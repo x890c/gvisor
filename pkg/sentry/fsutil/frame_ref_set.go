@@ -78,7 +78,7 @@ func (frSet *FrameRefSet) IncRefAndAccount(fr memmap.FileRange, memCgID uint32) 
 			frInfo := FrameRefSegInfo{refs: 1, memCgID: memCgID}
 			seg, gap = frSet.InsertWithoutMerging(gap, newRange, frInfo).NextNonEmpty()
 		default:
-			frSet.MergeAdjacent(fr)
+			frSet.MergeOutsideRange(fr)
 			return
 		}
 	}
@@ -99,5 +99,5 @@ func (frSet *FrameRefSet) DecRefAndAccount(fr memmap.FileRange) {
 			seg = seg.NextSegment()
 		}
 	}
-	frSet.MergeAdjacent(fr)
+	frSet.MergeOutsideRange(fr)
 }

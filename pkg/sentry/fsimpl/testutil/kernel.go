@@ -36,6 +36,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/seccheck"
 	"gvisor.dev/gvisor/pkg/sentry/time"
+	"gvisor.dev/gvisor/pkg/sentry/usage"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 
 	// Platforms are plugable.
@@ -52,6 +53,10 @@ var (
 func Boot() (*kernel.Kernel, error) {
 	cpuid.Initialize()
 	seccheck.Initialize()
+
+	if err := usage.Init(); err != nil {
+		return nil, fmt.Errorf("setting up memory accounting: %v", err)
+	}
 
 	platformCtr, err := platform.Lookup(*platformFlag)
 	if err != nil {
@@ -129,7 +134,10 @@ func CreateTask(ctx context.Context, name string, tc *kernel.ThreadGroup, mntns 
 	if err != nil {
 		return nil, err
 	}
-	m := mm.NewMemoryManager(k, k, k.SleepForAddressSpaceActivation)
+	m, err := mm.NewMemoryManager(k, k)
+	if err != nil {
+		return nil, err
+	}
 	m.SetExecutable(ctx, exe)
 
 	creds := auth.CredentialsFromContext(ctx)
