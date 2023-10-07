@@ -35,14 +35,15 @@ import (
 	"gvisor.dev/gvisor/test/secbench/secbenchdef"
 )
 
-// BenchFromSyscallRules returns a new Bench creates from SyscallRules.
+// BenchFromSyscallRules returns a new Bench created from SyscallRules.
 func BenchFromSyscallRules(b *testing.B, name string, profile secbenchdef.Profile, rules seccomp.SyscallRules, denyRules seccomp.SyscallRules) secbenchdef.Bench {
 	// If there is a rule allowing rt_sigreturn to be called,
 	// also add a rule for the stand-in syscall number instead.
-	if sigreturnRule, found := rules[unix.SYS_RT_SIGRETURN]; found {
-		rules[uintptr(secbenchdef.RTSigreturn.Data(profile.Arch).Nr)] = sigreturnRule
+	if rules.Has(unix.SYS_RT_SIGRETURN) {
+		rules = rules.Copy()
+		rules.Set(uintptr(secbenchdef.RTSigreturn.Data(profile.Arch).Nr), rules.Get(unix.SYS_RT_SIGRETURN))
 	}
-	instrs, err := seccomp.BuildProgram([]seccomp.RuleSet{
+	programInfo, err := seccomp.BuildProgramInfo([]seccomp.RuleSet{
 		{
 			Rules:  denyRules,
 			Action: linux.SECCOMP_RET_ERRNO,
@@ -58,7 +59,7 @@ func BenchFromSyscallRules(b *testing.B, name string, profile secbenchdef.Profil
 	return secbenchdef.Bench{
 		Name:    name,
 		Profile: secbenchdef.Profile(profile),
-		Program: instrs,
+		Program: programInfo,
 	}
 }
 
@@ -153,10 +154,14 @@ func RunBench(b *testing.B, bn secbenchdef.Bench) {
 		// two runs.
 		// If there are no syscall sequences that will be approved, then we can
 		// skip running the runner the second time altogether.
-		program, err := bpf.Compile(bn.Program)
+		program, err := bpf.Compile(bn.Program.Instructions)
 		if err != nil {
 			b.Fatalf("program does not compile: %v", err)
 		}
+		b.ReportMetric(float64(bn.Program.OptimizeDuration.Nanoseconds()), "opt-ns")
+		b.ReportMetric(float64(bn.Program.SizeBeforeOptimizations), "gen-instr")
+		b.ReportMetric(float64(bn.Program.SizeAfterOptimizations), "opt-instr")
+		b.ReportMetric(float64(bn.Program.SizeBeforeOptimizations)/float64(bn.Program.SizeAfterOptimizations), "compression-ratio")
 		activeSequences := make([]bool, len(bn.Profile.Sequences))
 		positiveSequenceIndexes := make(map[int]struct{}, len(bn.Profile.Sequences))
 		for i, seq := range bn.Profile.Sequences {

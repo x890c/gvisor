@@ -19,6 +19,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"gvisor.dev/gvisor/pkg/abi/linux"
 )
 
 const (
@@ -67,6 +69,18 @@ const (
 	JumpTrue
 	JumpFalse
 )
+
+// Max returns the maximum legal offset that a jump of this type supports.
+func (jt JumpType) Max() uint32 {
+	switch jt {
+	case JumpDirect:
+		return 0xffffffff
+	case JumpTrue, JumpFalse:
+		return 0xff
+	default:
+		panic("invalid jump type")
+	}
+}
 
 // source contains information about a single reference to a label.
 type source struct {
@@ -264,9 +278,13 @@ type FragmentOutcomes struct {
 	// fragment may jump to.
 	MayJumpToUnresolvedLabels map[string]struct{}
 
-	// MayReturn is true if executing the fragment may cause a return statement
-	// to be executed.
-	MayReturn bool
+	// MayReturnImmediate contains the set of possible immediate return values
+	// that the fragment may return.
+	MayReturnImmediate map[linux.BPFAction]struct{}
+
+	// MayReturnRegisterA is true if the fragment may return the value of
+	// register A.
+	MayReturnRegisterA bool
 }
 
 // String returns a list of possible human-readable outcomes.
@@ -275,26 +293,39 @@ func (o FragmentOutcomes) String() string {
 	if o.MayJumpToKnownOffsetBeyondFragment {
 		s = append(s, "may jump to known offset beyond fragment")
 	}
-	if o.MayJumpToUnresolvedLabels != nil {
-		sortedLabels := make([]string, 0, len(o.MayJumpToUnresolvedLabels))
-		for lbl := range o.MayJumpToUnresolvedLabels {
-			sortedLabels = append(sortedLabels, lbl)
-		}
-		sort.Strings(sortedLabels)
-		for _, lbl := range sortedLabels {
-			s = append(s, fmt.Sprintf("may jump to unresolved label %q", lbl))
-		}
+	sortedLabels := make([]string, 0, len(o.MayJumpToUnresolvedLabels))
+	for lbl := range o.MayJumpToUnresolvedLabels {
+		sortedLabels = append(sortedLabels, lbl)
+	}
+	sort.Strings(sortedLabels)
+	for _, lbl := range sortedLabels {
+		s = append(s, fmt.Sprintf("may jump to unresolved label %q", lbl))
 	}
 	if o.MayFallThrough {
 		s = append(s, "may fall through")
 	}
-	if o.MayReturn {
-		s = append(s, "may return")
+	sortedReturnValues := make([]uint32, 0, len(o.MayReturnImmediate))
+	for v := range o.MayReturnImmediate {
+		sortedReturnValues = append(sortedReturnValues, uint32(v))
+	}
+	sort.Slice(sortedReturnValues, func(i, j int) bool {
+		return sortedReturnValues[i] < sortedReturnValues[j]
+	})
+	for _, v := range sortedReturnValues {
+		s = append(s, fmt.Sprintf("may return '0x%x'", v))
+	}
+	if o.MayReturnRegisterA {
+		s = append(s, "may return register A")
 	}
 	if len(s) == 0 {
 		return "no outcomes (this should never happen)"
 	}
 	return strings.Join(s, ", ")
+}
+
+// MayReturn returns whether the fragment may return for any reason.
+func (o FragmentOutcomes) MayReturn() bool {
+	return len(o.MayReturnImmediate) > 0 || o.MayReturnRegisterA
 }
 
 // Outcomes returns the set of possible outcomes that executing this fragment
@@ -308,13 +339,19 @@ func (f ProgramFragment) Outcomes() FragmentOutcomes {
 	}
 	outcomes := FragmentOutcomes{
 		MayJumpToUnresolvedLabels: make(map[string]struct{}),
+		MayReturnImmediate:        make(map[linux.BPFAction]struct{}),
 	}
 	for pc := f.fromPC; pc < f.toPC; pc++ {
 		ins := f.b.instructions[pc]
 		isLastInstruction := pc == f.toPC-1
 		switch ins.OpCode & instructionClassMask {
 		case Ret:
-			outcomes.MayReturn = true
+			switch ins.OpCode {
+			case Ret | K:
+				outcomes.MayReturnImmediate[linux.BPFAction(ins.K)] = struct{}{}
+			case Ret | A:
+				outcomes.MayReturnRegisterA = true
+			}
 		case Jmp:
 			for _, offset := range ins.JumpOffsets() {
 				var foundLabelName string
@@ -351,4 +388,17 @@ func (f ProgramFragment) Outcomes() FragmentOutcomes {
 		}
 	}
 	return outcomes
+}
+
+// MayModifyRegisterA returns whether this fragment may modify register A.
+// A value of "true" does not necessarily mean that A *will* be modified,
+// as the control flow of this fragment may skip over instructions that
+// modify the A register.
+func (f ProgramFragment) MayModifyRegisterA() bool {
+	for pc := f.fromPC; pc < f.toPC; pc++ {
+		if f.b.instructions[pc].ModifiesRegisterA() {
+			return true
+		}
+	}
+	return false
 }

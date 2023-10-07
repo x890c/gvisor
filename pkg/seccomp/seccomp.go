@@ -19,6 +19,7 @@ package seccomp
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/bpf"
@@ -31,14 +32,11 @@ const (
 
 	// defaultLabel is the label for the default action.
 	defaultLabel = label("default_action")
-)
 
-// NonNegativeFDCheck ensures an FD argument is a non-negative int.
-func NonNegativeFDCheck() LessThanOrEqual {
-	// Negative int32 has the MSB (31st bit) set. So the raw uint FD value must
-	// be less than or equal to 0x7fffffff.
-	return LessThanOrEqual(0x7fffffff)
-}
+	// vsyscallPageIPMask is the bit we expect to see in the instruction
+	// pointer of a vsyscall call.
+	vsyscallPageIPMask = 1 << 31
+)
 
 // Install generates BPF code based on the set of syscalls provided. It only
 // allows syscalls that conform to the specification. Syscalls that violate the
@@ -65,7 +63,7 @@ func Install(rules SyscallRules, denyRules SyscallRules) error {
 	// below to get a panic stack trace when there is a violation.
 	// defaultAction = linux.BPFAction(linux.SECCOMP_RET_TRAP)
 
-	log.Infof("Installing seccomp filters for %d syscalls (action=%v)", len(rules), defaultAction)
+	log.Infof("Installing seccomp filters for %d syscalls (action=%v)", rules.Size(), defaultAction)
 
 	instrs, err := BuildProgram([]RuleSet{
 		{
@@ -196,7 +194,7 @@ func (f syscallProgramFragment) MustHaveJumpedTo(labels ...label) {
 	if outcomes.MayFallThrough {
 		panic(fmt.Sprintf("fragment %v may fall through", fragment))
 	}
-	if outcomes.MayReturn {
+	if outcomes.MayReturn() {
 		panic(fmt.Sprintf("fragment %v may return", fragment))
 	}
 	if outcomes.MayJumpToKnownOffsetBeyondFragment {
@@ -269,9 +267,53 @@ func (l *labelSet) Push(labelSuffix string, newRuleMatch, newRuleMismatch label)
 	}
 }
 
+// matchedValue keeps track of BPF instructions needed to load a 64-bit value
+// being matched against. Since BPF can only do operations on 32-bit
+// instructions, value-matching code needs to selectively load one or the
+// other half of the 64-bit value.
+type matchedValue struct {
+	program        *syscallProgram
+	dataOffsetHigh uint32
+	dataOffsetLow  uint32
+}
+
+// LoadHigh32Bits loads the high 32-bit of the 64-bit value into register A.
+func (m matchedValue) LoadHigh32Bits() {
+	m.program.Stmt(bpf.Ld|bpf.Abs|bpf.W, m.dataOffsetHigh)
+}
+
+// LoadLow32Bits loads the low 32-bit of the 64-bit value into register A.
+func (m matchedValue) LoadLow32Bits() {
+	m.program.Stmt(bpf.Ld|bpf.Abs|bpf.W, m.dataOffsetLow)
+}
+
+// ProgramInfo contains a seccomp program and information about its generation.
+type ProgramInfo struct {
+	// Instructions is the final set of instructions of the program.
+	Instructions []bpf.Instruction
+
+	// SizeBeforeOptimizations and SizeAfterOptimizations correspond to the
+	// number of instructions in the program before vs after optimization.
+	SizeBeforeOptimizations, SizeAfterOptimizations int
+
+	// OptimizeDuration is the amount of time it took to optimize the program.
+	OptimizeDuration time.Duration
+}
+
 // BuildProgram builds a BPF program from the given map of actions to matching
 // SyscallRules. The single generated program covers all provided RuleSets.
 func BuildProgram(rules []RuleSet, defaultAction, badArchAction linux.BPFAction) ([]bpf.Instruction, error) {
+	programInfo, err := BuildProgramInfo(rules, defaultAction, badArchAction)
+	if err != nil {
+		return nil, err
+	}
+	return programInfo.Instructions, nil
+}
+
+// BuildProgramInfo builds a BPF program from the given map of actions to
+// matching SyscallRules. The single generated program covers all provided
+// RuleSets. It returns information about the generated program.
+func BuildProgramInfo(rules []RuleSet, defaultAction, badArchAction linux.BPFAction) (ProgramInfo, error) {
 	program := &syscallProgram{
 		program: bpf.NewProgramBuilder(),
 	}
@@ -284,7 +326,7 @@ func BuildProgram(rules []RuleSet, defaultAction, badArchAction linux.BPFAction)
 	program.Stmt(bpf.Ld|bpf.Abs|bpf.W, seccompDataOffsetArch)
 	program.IfNot(bpf.Jmp|bpf.Jeq|bpf.K, LINUX_AUDIT_ARCH, badArchLabel)
 	if err := buildIndex(rules, program); err != nil {
-		return nil, err
+		return ProgramInfo{}, err
 	}
 
 	// Default label if none of the rules matched:
@@ -297,13 +339,20 @@ func BuildProgram(rules []RuleSet, defaultAction, badArchAction linux.BPFAction)
 
 	insns, err := program.program.Instructions()
 	if err != nil {
-		return insns, err
+		return ProgramInfo{}, err
 	}
 	beforeOpt := len(insns)
+	timeBeforeOpt := time.Now()
 	insns = bpf.Optimize(insns)
+	optimizeDuration := time.Since(timeBeforeOpt)
 	afterOpt := len(insns)
-	log.Debugf("Seccomp program optimized from %d to %d instructions", beforeOpt, afterOpt)
-	return insns, nil
+	log.Debugf("Seccomp program optimized from %d to %d instructions in %v", beforeOpt, afterOpt, optimizeDuration)
+	return ProgramInfo{
+		Instructions:            insns,
+		SizeBeforeOptimizations: beforeOpt,
+		SizeAfterOptimizations:  afterOpt,
+		OptimizeDuration:        optimizeDuration,
+	}, nil
 }
 
 // buildIndex builds a BST to quickly search through all syscalls.
@@ -318,7 +367,7 @@ func buildIndex(rules []RuleSet, program *syscallProgram) error {
 	// with different actions. The matchers are evaluated linearly.
 	requiredSyscalls := make(map[uintptr]struct{})
 	for _, rs := range rules {
-		for sysno := range rs.Rules {
+		for sysno := range rs.Rules.rules {
 			requiredSyscalls[sysno] = struct{}{}
 		}
 	}
@@ -330,8 +379,8 @@ func buildIndex(rules []RuleSet, program *syscallProgram) error {
 	for _, sysno := range syscalls {
 		for _, rs := range rules {
 			// Print only if there is a corresponding set of rules.
-			if _, ok := rs.Rules[sysno]; ok {
-				log.Debugf("syscall filter %v: %s => 0x%x", SyscallName(sysno), rs.Rules[sysno], rs.Action)
+			if r, ok := rs.Rules.rules[sysno]; ok {
+				log.Debugf("syscall filter %v: %s => 0x%x", SyscallName(sysno), r, rs.Action)
 			}
 		}
 	}
@@ -404,7 +453,7 @@ func buildBSTProgram(n *node, rules []RuleSet, program *syscallProgram) error {
 	program.Label(checkArgsLabel)
 
 	for ruleSetIdx, rs := range rules {
-		rule, ok := rs.Rules[sysno]
+		rule, ok := rs.Rules.rules[sysno]
 		if !ok {
 			continue
 		}
@@ -417,7 +466,7 @@ func buildBSTProgram(n *node, rules []RuleSet, program *syscallProgram) error {
 		// the vsyscall page will be mapped.
 		if rs.Vsyscall {
 			program.Stmt(bpf.Ld|bpf.Abs|bpf.W, seccompDataOffsetIPHigh)
-			program.IfNot(bpf.Jmp|bpf.Jset|bpf.K, 0x80000000, ruleSetLabelSet.Mismatched())
+			program.IfNot(bpf.Jmp|bpf.Jset|bpf.K, vsyscallPageIPMask, ruleSetLabelSet.Mismatched())
 		}
 
 		// Add an argument check for these particular
@@ -425,7 +474,7 @@ func buildBSTProgram(n *node, rules []RuleSet, program *syscallProgram) error {
 		// check the next rule set. We need to ensure
 		// that at the very end, we insert a direct
 		// jump label for the unmatched case.
-		rule.Render(program, ruleSetLabelSet)
+		optimizeSyscallRule(rule).Render(program, ruleSetLabelSet)
 		frag.MustHaveJumpedTo(ruleSetLabelSet.Matched(), ruleSetLabelSet.Mismatched())
 		program.Label(ruleSetLabelSet.Matched())
 		program.Ret(rs.Action)
