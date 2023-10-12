@@ -21,7 +21,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"sync"
 	"testing"
 	"time"
 
@@ -52,7 +51,10 @@ func BenchFromSyscallRules(b *testing.B, name string, profile secbenchdef.Profil
 			Rules:  rules,
 			Action: linux.SECCOMP_RET_ALLOW,
 		},
-	}, linux.SECCOMP_RET_ERRNO, linux.SECCOMP_RET_ERRNO)
+	}, seccomp.ProgramOptions{
+		DefaultAction: seccomp.Return(linux.SECCOMP_RET_ERRNO),
+		BadArchAction: seccomp.Return(linux.SECCOMP_RET_ERRNO),
+	})
 	if err != nil {
 		b.Fatalf("BuildProgram() failed: %v", err)
 	}
@@ -85,14 +87,6 @@ func runRequest(runReq secbenchdef.BenchRunRequest) (secbenchdef.BenchRunRespons
 		return secbenchdef.BenchRunResponse{}, fmt.Errorf("cannot attach pipe to stdout: %v", err)
 	}
 	defer stdout.Close()
-	var stdoutData []byte
-	var stdoutErr error
-	var stdoutWait sync.WaitGroup
-	stdoutWait.Add(1)
-	go func() {
-		defer stdoutWait.Done()
-		stdoutData, stdoutErr = io.ReadAll(stdout)
-	}()
 	if err := cmd.Start(); err != nil {
 		return secbenchdef.BenchRunResponse{}, fmt.Errorf("cannot start runner: %v", err)
 	}
@@ -102,12 +96,12 @@ func runRequest(runReq secbenchdef.BenchRunRequest) (secbenchdef.BenchRunRespons
 	if err := stdin.Close(); err != nil {
 		return secbenchdef.BenchRunResponse{}, fmt.Errorf("cannot close runner stdin pipe: %v", err)
 	}
+	stdoutData, err := io.ReadAll(stdout)
+	if err != nil {
+		return secbenchdef.BenchRunResponse{}, fmt.Errorf("failed to read from runner stdout: %v", err)
+	}
 	if err := cmd.Wait(); err != nil {
 		return secbenchdef.BenchRunResponse{}, fmt.Errorf("runner failed: %v", err)
-	}
-	stdoutWait.Wait()
-	if stdoutErr != nil {
-		return secbenchdef.BenchRunResponse{}, fmt.Errorf("failed to read from runner stdout: %v", stdoutErr)
 	}
 	var runResp secbenchdef.BenchRunResponse
 	if err := json.Unmarshal(stdoutData, &runResp); err != nil {

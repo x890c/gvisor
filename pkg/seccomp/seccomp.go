@@ -32,14 +32,11 @@ const (
 
 	// defaultLabel is the label for the default action.
 	defaultLabel = label("default_action")
-)
 
-// NonNegativeFDCheck ensures an FD argument is a non-negative int.
-func NonNegativeFDCheck() LessThanOrEqual {
-	// Negative int32 has the MSB (31st bit) set. So the raw uint FD value must
-	// be less than or equal to 0x7fffffff.
-	return LessThanOrEqual(0x7fffffff)
-}
+	// vsyscallPageIPMask is the bit we expect to see in the instruction
+	// pointer of a vsyscall call.
+	vsyscallPageIPMask = 1 << 31
+)
 
 // Install generates BPF code based on the set of syscalls provided. It only
 // allows syscalls that conform to the specification. Syscalls that violate the
@@ -55,29 +52,27 @@ func NonNegativeFDCheck() LessThanOrEqual {
 // making it possible for the process to continue running after a violation.
 // However, it will leave a SECCOMP audit event trail behind. In any case, the
 // syscall is still blocked from executing.
-func Install(rules SyscallRules, denyRules SyscallRules) error {
-	defaultAction, err := defaultAction()
-	if err != nil {
-		return err
-	}
-
+func Install(rules SyscallRules, denyRules SyscallRules, options ProgramOptions) error {
 	// ***   DEBUG TIP   ***
 	// If you suspect the process is getting killed due to a seccomp violation, uncomment the line
 	// below to get a panic stack trace when there is a violation.
-	// defaultAction = linux.BPFAction(linux.SECCOMP_RET_TRAP)
+	// options.DefaultAction = Return(linux.BPFAction(linux.SECCOMP_RET_TRAP))
 
-	log.Infof("Installing seccomp filters for %d syscalls (action=%v)", rules.Size(), defaultAction)
+	if err := options.resolve(); err != nil {
+		return err
+	}
+	log.Infof("Installing seccomp filters for %d syscalls (action=%v)", rules.Size(), options.defaultAction)
 
 	instrs, _, err := BuildProgram([]RuleSet{
 		{
 			Rules:  denyRules,
-			Action: defaultAction,
+			Action: options.defaultAction,
 		},
 		{
 			Rules:  rules,
 			Action: linux.SECCOMP_RET_ALLOW,
 		},
-	}, defaultAction, defaultAction)
+	}, options)
 	if log.IsLogging(log.Debug) {
 		programStr, errDecode := bpf.DecodeInstructions(instrs)
 		if errDecode != nil {
@@ -192,27 +187,50 @@ type syscallProgramFragment struct {
 // given labels.
 // The fragment may not jump to any other label, nor return, nor fall through.
 func (f syscallProgramFragment) MustHaveJumpedTo(labels ...label) {
+	f.MustHaveJumpedToOrReturned(labels, nil)
+}
+
+// MustHaveJumpedTo asserts that the fragment must jump to one of the
+// given labels, or have returned one of the given return values.
+// The fragment may not jump to any other label, nor fall through,
+// nor return a non-deterministic value.
+func (f syscallProgramFragment) MustHaveJumpedToOrReturned(possibleLabels []label, possibleReturnValues []linux.BPFAction) {
 	fragment := f.getFragment()
 	outcomes := fragment.Outcomes()
 	if outcomes.MayFallThrough {
 		panic(fmt.Sprintf("fragment %v may fall through", fragment))
 	}
-	if outcomes.MayReturn {
+	if len(possibleReturnValues) == 0 && outcomes.MayReturn() {
 		panic(fmt.Sprintf("fragment %v may return", fragment))
+	}
+	if outcomes.MayReturnRegisterA {
+		panic(fmt.Sprintf("fragment %v may return register A", fragment))
 	}
 	if outcomes.MayJumpToKnownOffsetBeyondFragment {
 		panic(fmt.Sprintf("fragment %v may jump to an offset beyond the fragment", fragment))
 	}
 	for jumpLabel := range outcomes.MayJumpToUnresolvedLabels {
 		found := false
-		for _, wantLabel := range labels {
+		for _, wantLabel := range possibleLabels {
 			if jumpLabel == string(wantLabel) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			panic(fmt.Sprintf("fragment %v may jump to a label %q which is not one of %v", fragment, jumpLabel, labels))
+			panic(fmt.Sprintf("fragment %v may jump to a label %q which is not one of %v", fragment, jumpLabel, possibleLabels))
+		}
+	}
+	for returnValue := range outcomes.MayReturnImmediate {
+		found := false
+		for _, wantValue := range possibleReturnValues {
+			if returnValue == wantValue {
+				found = true
+				break
+			}
+		}
+		if !found {
+			panic(fmt.Sprintf("fragment %v may return a value %q which is not one of %v", fragment, returnValue, possibleReturnValues))
 		}
 	}
 }
@@ -270,6 +288,80 @@ func (l *labelSet) Push(labelSuffix string, newRuleMatch, newRuleMismatch label)
 	}
 }
 
+// matchedValue keeps track of BPF instructions needed to load a 64-bit value
+// being matched against. Since BPF can only do operations on 32-bit
+// instructions, value-matching code needs to selectively load one or the
+// other half of the 64-bit value.
+type matchedValue struct {
+	program        *syscallProgram
+	dataOffsetHigh uint32
+	dataOffsetLow  uint32
+}
+
+// LoadHigh32Bits loads the high 32-bit of the 64-bit value into register A.
+func (m matchedValue) LoadHigh32Bits() {
+	m.program.Stmt(bpf.Ld|bpf.Abs|bpf.W, m.dataOffsetHigh)
+}
+
+// LoadLow32Bits loads the low 32-bit of the 64-bit value into register A.
+func (m matchedValue) LoadLow32Bits() {
+	m.program.Stmt(bpf.Ld|bpf.Abs|bpf.W, m.dataOffsetLow)
+}
+
+// ProgramOptions configure a seccomp program.
+type ProgramOptions struct {
+	// DefaultAction is the action done when none of the rules match.
+	// If unspecified, defaults to `SECCOMP_RET_KILL_PROCESS` if available,
+	// or `SECCOMP_RET_TRAP` otherwise.
+	DefaultAction func() (linux.BPFAction, error)
+
+	// BadArchAction is the action done when the architecture of the
+	// syscall structure input doesn't match the one the program expects.
+	// If unspecified, defaults to `SECCOMP_RET_KILL_PROCESS` if available,
+	// or `SECCOMP_RET_TRAP` otherwise.
+	BadArchAction func() (linux.BPFAction, error)
+
+	// resolved is set to `true` once `resolve` is called.
+	resolved bool
+	// defaultAction is the resolved action to return from `DefaultAction`.
+	defaultAction linux.BPFAction
+	// badArchAction is the resolved action to return from `BadArchAction`.
+	badArchAction linux.BPFAction
+}
+
+// Return returns a function that can be used in `ProgramOptions` to indicate
+// that the given `action` should be returned by the BPF program.
+func Return(action linux.BPFAction) func() (linux.BPFAction, error) {
+	return func() (linux.BPFAction, error) {
+		return action, nil
+	}
+}
+
+// resolve sets resolved action fields to their intended values.
+func (po *ProgramOptions) resolve() error {
+	if po.resolved {
+		return nil
+	}
+	if po.DefaultAction == nil {
+		po.DefaultAction = defaultAction
+	}
+	if po.BadArchAction == nil {
+		po.BadArchAction = defaultAction
+	}
+	defaultAct, err := po.DefaultAction()
+	if err != nil {
+		return err
+	}
+	badArchAct, err := po.BadArchAction()
+	if err != nil {
+		return err
+	}
+	po.defaultAction = defaultAct
+	po.badArchAction = badArchAct
+	po.resolved = true
+	return nil
+}
+
 // BuildStats contains information about seccomp program generation.
 type BuildStats struct {
 	// SizeBeforeOptimizations and SizeAfterOptimizations correspond to the
@@ -287,7 +379,11 @@ type BuildStats struct {
 
 // BuildProgram builds a BPF program from the given map of actions to matching
 // SyscallRules. The single generated program covers all provided RuleSets.
-func BuildProgram(rules []RuleSet, defaultAction, badArchAction linux.BPFAction) ([]bpf.Instruction, BuildStats, error) {
+func BuildProgram(rules []RuleSet, options ProgramOptions) ([]bpf.Instruction, BuildStats, error) {
+	if err := options.resolve(); err != nil {
+		return nil, BuildStats{}, err
+	}
+
 	start := time.Now()
 	program := &syscallProgram{
 		program: bpf.NewProgramBuilder(),
@@ -306,11 +402,11 @@ func BuildProgram(rules []RuleSet, defaultAction, badArchAction linux.BPFAction)
 
 	// Default label if none of the rules matched:
 	program.Label(defaultLabel)
-	program.Ret(defaultAction)
+	program.Ret(options.defaultAction)
 
 	// Label if the architecture didn't match:
 	program.Label(badArchLabel)
-	program.Ret(badArchAction)
+	program.Ret(options.badArchAction)
 
 	insns, err := program.program.Instructions()
 	if err != nil {
@@ -409,31 +505,34 @@ func buildBSTProgram(n *node, rules []RuleSet, program *syscallProgram) error {
 	if !n.root {
 		program.Label(n.label())
 	}
-
 	nodeLabelSet := &labelSet{prefix: string(n.label())}
-
 	sysno := n.value
-	frag := program.Record()
+	nodeFrag := program.Record()
 	checkArgsLabel := label(fmt.Sprintf("checkArgs_%d", sysno))
-	program.If(bpf.Jmp|bpf.Jeq|bpf.K, uint32(sysno), checkArgsLabel)
-	if n.left == nil && n.right == nil {
-		// Leaf nodes don't require extra check.
-		program.JumpTo(defaultLabel)
-	} else {
-		// Non-leaf node. Check which turn to take.
-		program.If(bpf.Jmp|bpf.Jgt|bpf.K, uint32(sysno), n.right.label())
-		program.JumpTo(n.left.label())
+	if n.left != nil {
+		program.IfNot(bpf.Jmp|bpf.Jge|bpf.K, uint32(sysno), n.left.label())
 	}
-	frag.MustHaveJumpedTo(n.left.label(), n.right.label(), checkArgsLabel)
-	program.Label(checkArgsLabel)
+	if n.right != nil {
+		program.If(bpf.Jmp|bpf.Jgt|bpf.K, uint32(sysno), n.right.label())
+	}
+	if n.left == nil || n.right == nil {
+		// If we haven't checked both the left and right node, we still need
+		// to check for equality.
+		program.IfNot(bpf.Jmp|bpf.Jeq|bpf.K, uint32(sysno), defaultLabel)
+	}
+	program.JumpTo(checkArgsLabel)
+	nodeFrag.MustHaveJumpedTo(n.left.label(), n.right.label(), checkArgsLabel, defaultLabel)
 
+	program.Label(checkArgsLabel)
+	ruleSetsFrag := program.Record()
+	var possibleActions []linux.BPFAction
 	for ruleSetIdx, rs := range rules {
 		rule, ok := rs.Rules.rules[sysno]
 		if !ok {
 			continue
 		}
 		ruleSetLabelSet := nodeLabelSet.Push(fmt.Sprintf("rs[%d]", ruleSetIdx), nodeLabelSet.NewLabel(), nodeLabelSet.NewLabel())
-		frag := program.Record()
+		ruleSetFrag := program.Record()
 
 		// Emit a vsyscall check if this rule requires a
 		// Vsyscall match. This rule ensures that the top bit
@@ -441,7 +540,7 @@ func buildBSTProgram(n *node, rules []RuleSet, program *syscallProgram) error {
 		// the vsyscall page will be mapped.
 		if rs.Vsyscall {
 			program.Stmt(bpf.Ld|bpf.Abs|bpf.W, seccompDataOffsetIPHigh)
-			program.IfNot(bpf.Jmp|bpf.Jset|bpf.K, 0x80000000, ruleSetLabelSet.Mismatched())
+			program.IfNot(bpf.Jmp|bpf.Jset|bpf.K, vsyscallPageIPMask, ruleSetLabelSet.Mismatched())
 		}
 
 		// Add an argument check for these particular
@@ -449,13 +548,22 @@ func buildBSTProgram(n *node, rules []RuleSet, program *syscallProgram) error {
 		// check the next rule set. We need to ensure
 		// that at the very end, we insert a direct
 		// jump label for the unmatched case.
-		rule.Render(program, ruleSetLabelSet)
-		frag.MustHaveJumpedTo(ruleSetLabelSet.Matched(), ruleSetLabelSet.Mismatched())
+		optimizeSyscallRule(rule).Render(program, ruleSetLabelSet)
+		ruleSetFrag.MustHaveJumpedTo(ruleSetLabelSet.Matched(), ruleSetLabelSet.Mismatched())
 		program.Label(ruleSetLabelSet.Matched())
 		program.Ret(rs.Action)
+		possibleActions = append(possibleActions, rs.Action)
+		ruleSetFrag.MustHaveJumpedToOrReturned(
+			[]label{ruleSetLabelSet.Mismatched()}, // Either the ruleset mismatched...
+			[]linux.BPFAction{rs.Action},          // ... or it returned its defined action.
+		)
 		program.Label(ruleSetLabelSet.Mismatched())
 	}
 	program.JumpTo(defaultLabel)
+	ruleSetsFrag.MustHaveJumpedToOrReturned(
+		[]label{defaultLabel}, // Either we jumped to the default label...
+		possibleActions,       // ... or we returned one of the actions of the rulesets.
+	)
 	return nil
 }
 
