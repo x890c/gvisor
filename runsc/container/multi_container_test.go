@@ -2522,3 +2522,78 @@ func TestMultiContainerMemoryLeakStress(t *testing.T) {
 		}
 	}
 }
+
+func TestMultiContainerCgroupsMemoryUsage(t *testing.T) {
+	_, err := testutil.FindFile("test/cmd/test_app/test_app")
+	if err != nil {
+		t.Fatal("error finding test_app:", err)
+	}
+
+	for name, conf := range configs(t, false /* noOverlay */) {
+		conf.Cgroupfs = true
+		t.Run(name, func(t *testing.T) {
+			rootDir, cleanup, err := testutil.SetupRootDir()
+			if err != nil {
+				t.Fatalf("error creating root dir: %v", err)
+			}
+			defer cleanup()
+			conf.RootDir = rootDir
+
+			podSpecs, ids := createSpecs(
+				[]string{"sleep", "100"},
+				[]string{"sleep", "10"})
+
+			podSpecs[1].Linux = &specs.Linux{
+				Namespaces: []specs.LinuxNamespace{{Type: "pid"}},
+			}
+			containers, cleanup, err := startContainers(conf, podSpecs, ids)
+			if err != nil {
+				t.Fatalf("error starting containers: %v", err)
+			}
+			defer cleanup()
+
+			ctrlRoot := control.CgroupControlFile{
+				Controller: "memory",
+				Path:       "/",
+				Name:       "memory.usage_in_bytes",
+			}
+			ctrl1 := control.CgroupControlFile{
+				Controller: "memory",
+				Path:       "/" + containers[0].ID,
+				Name:       "memory.usage_in_bytes",
+			}
+			ctrl2 := control.CgroupControlFile{
+				Controller: "memory",
+				Path:       "/" + containers[1].ID,
+				Name:       "memory.usage_in_bytes",
+			}
+
+			usageTotal, err := containers[0].Sandbox.CgroupsReadControlFile(ctrlRoot)
+			if err != nil {
+				t.Fatalf("error getting total usage %v", err)
+			}
+			usage1, err := containers[0].Sandbox.CgroupsReadControlFile(ctrl1)
+			if err != nil {
+				t.Fatalf("error getting container1 usage %v", err)
+			}
+			usage2, err := containers[1].Sandbox.CgroupsReadControlFile(ctrl2)
+			if err != nil {
+				t.Fatalf("error getting container2 usage %v", err)
+			}
+			if usageTotal < (usage1 + usage2) {
+				t.Fatalf("error total usage is less total %v container1_usage %v container2_usage %v", usageTotal, usage1, usage2)
+			}
+
+			// Wait for the second container to exit and check that the new usage must
+			// be less than the old usage..
+			time.Sleep(12 * time.Second)
+			newUsageTotal, err := containers[0].Sandbox.CgroupsReadControlFile(ctrlRoot)
+			if err != nil {
+				t.Fatalf("error getting total usage %v", err)
+			}
+			if newUsageTotal >= usageTotal {
+				t.Fatalf("error new total usage %v is not less than old total usage %v", newUsageTotal, usageTotal)
+			}
+		})
+	}
+}

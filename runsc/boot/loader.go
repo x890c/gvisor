@@ -163,6 +163,10 @@ type Loader struct {
 	// within the same pod. It is mapped by mount source.
 	sharedMounts map[string]*vfs.Mount
 
+	// cgroupMounts is a map of cgroup mounts that can be reused across
+	// containers. It is mapped by cgroup controller name.
+	cgroupMounts map[string]*cgroupMount
+
 	// productName is the value to show in
 	// /sys/devices/virtual/dmi/id/product_name.
 	productName string
@@ -943,8 +947,13 @@ func (l *Loader) createContainerProcess(root bool, cid string, info *containerIn
 		if err := l.processHints(info.conf, info.procArgs.Credentials); err != nil {
 			return nil, nil, err
 		}
+
+		// Mounts cgroups for cpu, cpuacct and memory controllers.
+		if err := l.mountCgroupMounts(info.conf, info.procArgs.Credentials); err != nil {
+			return nil, nil, err
+		}
 	}
-	mntr := newContainerMounter(info, l.k, l.mountHints, l.sharedMounts, l.productName, l.sandboxID)
+	mntr := newContainerMounter(info, l.k, l.mountHints, l.sharedMounts, l.productName, l.sandboxID, l.cgroupMounts, cid)
 	if err := setupContainerVFS(ctx, info, mntr, &info.procArgs); err != nil {
 		return nil, nil, err
 	}
@@ -956,6 +965,23 @@ func (l *Loader) createContainerProcess(root bool, cid string, info *containerIn
 		return nil, nil, err
 	}
 
+	// If cgroups is enabled, then only check for the cgroup mounts per
+	// container. Otherwise the root cgroups will be enabled.
+	if info.conf.Cgroupfs {
+		controllers := []kernel.CgroupControllerType{"cpu", "cpuacct", "memory"}
+		cgroupRegistry := l.k.CgroupRegistry()
+		for _, ctrl := range controllers {
+			cg, err := cgroupRegistry.FindCgroup(ctx, ctrl, "/"+cid)
+			if err != nil {
+				// Nothing to do here. Root cgroups will be set for the task.
+			} else {
+				if info.procArgs.InitialCgroups == nil {
+					info.procArgs.InitialCgroups = make(map[kernel.Cgroup]struct{}, len(controllers))
+				}
+				info.procArgs.InitialCgroups[cg] = struct{}{}
+			}
+		}
+	}
 	// Create and start the new process.
 	tg, _, err := l.k.CreateProcess(info.procArgs)
 	if err != nil {

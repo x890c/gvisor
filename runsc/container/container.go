@@ -587,6 +587,7 @@ func (c *Container) Execute(conf *config.Config, args *control.ExecArgs) (int32,
 		return 0, err
 	}
 	args.ContainerID = c.ID
+	args.Cgroupfs = conf.Cgroupfs
 	return c.Sandbox.Execute(conf, args)
 }
 
