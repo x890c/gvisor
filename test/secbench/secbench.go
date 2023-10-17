@@ -27,8 +27,6 @@ import (
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/bpf"
-	"gvisor.dev/gvisor/pkg/hostarch"
-	"gvisor.dev/gvisor/pkg/marshal"
 	"gvisor.dev/gvisor/pkg/seccomp"
 	"gvisor.dev/gvisor/pkg/test/testutil"
 	"gvisor.dev/gvisor/test/secbench/secbenchdef"
@@ -108,7 +106,7 @@ func runRequest(runReq secbenchdef.BenchRunRequest) (secbenchdef.BenchRunRespons
 }
 
 func evalSyscall(program bpf.Program, arch uint32, sc secbenchdef.Syscall) (uint32, error) {
-	scData := &linux.SeccompData{
+	return bpf.Exec(program, seccomp.DataAsBPFInput(&linux.SeccompData{
 		Nr:   int32(sc.Sysno),
 		Arch: arch,
 		Args: [6]uint64{
@@ -119,11 +117,7 @@ func evalSyscall(program bpf.Program, arch uint32, sc secbenchdef.Syscall) (uint
 			uint64(sc.Args[4]),
 			uint64(sc.Args[5]),
 		},
-	}
-	return bpf.Exec(program, bpf.InputBytes{
-		Data:  marshal.Marshal(scData),
-		Order: hostarch.ByteOrder,
-	})
+	}))
 }
 
 // Number of times we scale b.N by.
@@ -146,7 +140,7 @@ func RunBench(b *testing.B, bn secbenchdef.Bench) {
 		// two runs.
 		// If there are no syscall sequences that will be approved, then we can
 		// skip running the runner the second time altogether.
-		program, err := bpf.Compile(bn.Instructions)
+		program, err := bpf.Compile(bn.Instructions, true)
 		if err != nil {
 			b.Fatalf("program does not compile: %v", err)
 		}

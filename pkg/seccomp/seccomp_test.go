@@ -31,7 +31,6 @@ import (
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/bpf"
-	"gvisor.dev/gvisor/pkg/hostarch"
 )
 
 //go:embed victim
@@ -56,16 +55,6 @@ func newVictim() (string, error) {
 	return path, nil
 }
 
-// dataAsInput converts a linux.SeccompData to a bpf.Input.
-func dataAsInput(d *linux.SeccompData) bpf.Input {
-	buf := make([]byte, d.SizeBytes())
-	d.MarshalUnsafe(buf)
-	return bpf.InputBytes{
-		Data:  buf,
-		Order: hostarch.ByteOrder,
-	}
-}
-
 func TestBasic(t *testing.T) {
 	type spec struct {
 		// desc is the test's description.
@@ -81,6 +70,7 @@ func TestBasic(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		ruleSets      []RuleSet
+		wantPanic     bool
 		defaultAction linux.BPFAction
 		badArchAction linux.BPFAction
 		specs         []spec
@@ -313,6 +303,67 @@ func TestBasic(t *testing.T) {
 					want: linux.SECCOMP_RET_TRAP,
 				},
 			},
+		},
+		{
+			name: "empty Or is invalid",
+			ruleSets: []RuleSet{
+				{
+					Rules: MakeSyscallRules(map[uintptr]SyscallRule{
+						1: Or{},
+					}),
+					Action: linux.SECCOMP_RET_ALLOW,
+				},
+			},
+			wantPanic: true,
+		},
+		{
+			name: "And of multiple rules",
+			ruleSets: []RuleSet{
+				{
+					Rules: MakeSyscallRules(map[uintptr]SyscallRule{
+						1: And{
+							PerArg{
+								NotEqual(0xf),
+							},
+							PerArg{
+								NotEqual(0xe),
+							},
+						},
+					}),
+					Action: linux.SECCOMP_RET_ALLOW,
+				},
+			},
+			defaultAction: linux.SECCOMP_RET_TRAP,
+			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			specs: []spec{
+				{
+					desc: "hit first rule",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0xf}},
+					want: linux.SECCOMP_RET_TRAP,
+				},
+				{
+					desc: "hit 2nd rule",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0xe}},
+					want: linux.SECCOMP_RET_TRAP,
+				},
+				{
+					desc: "hit neither rule",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0xd}},
+					want: linux.SECCOMP_RET_ALLOW,
+				},
+			},
+		},
+		{
+			name: "empty And is invalid",
+			ruleSets: []RuleSet{
+				{
+					Rules: MakeSyscallRules(map[uintptr]SyscallRule{
+						1: And{},
+					}),
+					Action: linux.SECCOMP_RET_ALLOW,
+				},
+			},
+			wantPanic: true,
 		},
 		{
 			name: "EqualTo",
@@ -849,6 +900,68 @@ func TestBasic(t *testing.T) {
 			},
 		},
 		{
+			name: "NonNegativeFD",
+			ruleSets: []RuleSet{
+				{
+					Rules: MakeSyscallRules(map[uintptr]SyscallRule{
+						1: PerArg{
+							NonNegativeFD{},
+						},
+					}),
+					Action: linux.SECCOMP_RET_ALLOW,
+				},
+			},
+			defaultAction: linux.SECCOMP_RET_TRAP,
+			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			specs: []spec{
+				{
+					desc: "zero allowed",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0x0}},
+					want: linux.SECCOMP_RET_ALLOW,
+				},
+				{
+					desc: "one allowed",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0x0}},
+					want: linux.SECCOMP_RET_ALLOW,
+				},
+				{
+					desc: "seven allowed",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0x7}},
+					want: linux.SECCOMP_RET_ALLOW,
+				},
+				{
+					desc: "largest int32 allowed",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0x7fffffff}},
+					want: linux.SECCOMP_RET_ALLOW,
+				},
+				{
+					desc: "negative 1 not allowed",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0x80000000}},
+					want: linux.SECCOMP_RET_TRAP,
+				},
+				{
+					desc: "largest uint32 not allowed",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0xffffffff}},
+					want: linux.SECCOMP_RET_TRAP,
+				},
+				{
+					desc: "a positive int64 larger than max uint32 is not allowed",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0x100000000}},
+					want: linux.SECCOMP_RET_TRAP,
+				},
+				{
+					desc: "largest int64 not allowed",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0x7fffffffffffffff}},
+					want: linux.SECCOMP_RET_TRAP,
+				},
+				{
+					desc: "largest uint64 not allowed",
+					data: linux.SeccompData{Nr: 1, Arch: LINUX_AUDIT_ARCH, Args: [6]uint64{0xffffffffffffffff}},
+					want: linux.SECCOMP_RET_TRAP,
+				},
+			},
+		},
+		{
 			name: "Instruction Pointer",
 			ruleSets: []RuleSet{
 				{
@@ -877,16 +990,35 @@ func TestBasic(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			instrs, _, err := BuildProgram(test.ruleSets, test.defaultAction, test.badArchAction)
-			if err != nil {
-				t.Fatalf("BuildProgram() got error: %v", err)
+			var instrs []bpf.Instruction
+			var panicErr any
+			func() {
+				t.Helper()
+				defer func() {
+					panicErr = recover()
+					t.Helper()
+				}()
+				var err error
+				instrs, _, err = BuildProgram(test.ruleSets, test.defaultAction, test.badArchAction)
+				if err != nil {
+					t.Fatalf("BuildProgram() got error: %v", err)
+				}
+			}()
+			if test.wantPanic {
+				if panicErr == nil {
+					t.Fatal("BuildProgram did not panick")
+				}
+				return
 			}
-			p, err := bpf.Compile(instrs)
+			if panicErr != nil {
+				t.Fatalf("BuildProgram unexpectedly panicked: %v", panicErr)
+			}
+			p, err := bpf.Compile(instrs, true)
 			if err != nil {
 				t.Fatalf("bpf.Compile() got error: %v", err)
 			}
 			for _, spec := range test.specs {
-				got, err := bpf.Exec(p, dataAsInput(&spec.data))
+				got, err := bpf.Exec(p, DataAsBPFInput(&spec.data))
 				if err != nil {
 					t.Fatalf("%s: bpf.Exec() got error: %v", spec.desc, err)
 				}
@@ -922,13 +1054,13 @@ func TestRandom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildProgram() got error: %v", err)
 	}
-	p, err := bpf.Compile(instrs)
+	p, err := bpf.Compile(instrs, true)
 	if err != nil {
 		t.Fatalf("bpf.Compile() got error: %v", err)
 	}
 	for i := uint32(0); i < 200; i++ {
 		data := linux.SeccompData{Nr: int32(i), Arch: LINUX_AUDIT_ARCH}
-		got, err := bpf.Exec(p, dataAsInput(&data))
+		got, err := bpf.Exec(p, DataAsBPFInput(&data))
 		if err != nil {
 			t.Errorf("bpf.Exec() got error: %v, for syscall %d", err, i)
 			continue
@@ -1002,28 +1134,28 @@ func TestMerge(t *testing.T) {
 		want  SyscallRule
 	}{
 		{
-			name:  "AllowAll both",
+			name:  "MatchAll both",
 			main:  MatchAll{},
 			merge: MatchAll{},
-			want:  MatchAll{},
+			want:  Or{MatchAll{}, MatchAll{}},
 		},
 		{
-			name:  "AllowAll and Or",
+			name:  "MatchAll and Or",
 			main:  MatchAll{},
-			merge: Or{},
-			want:  MatchAll{},
+			merge: Or{PerArg{EqualTo(0)}},
+			want:  Or{MatchAll{}, Or{PerArg{EqualTo(0)}}},
 		},
 		{
-			name:  "Or and AllowAll",
-			main:  Or{},
+			name:  "Or and MatchAll",
+			main:  Or{PerArg{EqualTo(0)}},
 			merge: MatchAll{},
-			want:  MatchAll{},
+			want:  Or{Or{PerArg{EqualTo(0)}}, MatchAll{}},
 		},
 		{
 			name:  "2 Ors",
 			main:  Or{PerArg{EqualTo(0)}},
 			merge: Or{PerArg{EqualTo(1)}},
-			want:  Or{PerArg{EqualTo(0)}, PerArg{EqualTo(1)}},
+			want:  Or{Or{PerArg{EqualTo(0)}}, Or{PerArg{EqualTo(1)}}},
 		},
 	} {
 		t.Run(tst.name, func(t *testing.T) {
@@ -1035,6 +1167,188 @@ func TestMerge(t *testing.T) {
 			wantRules := MakeSyscallRules(map[uintptr]SyscallRule{1: tst.want})
 			if !reflect.DeepEqual(mainRules, wantRules) {
 				t.Errorf("got rules:\n%v\nwant rules:\n%v\n", mainRules, wantRules)
+			}
+		})
+	}
+}
+
+// TestOptimizeSyscallRule tests the behavior of syscall rule optimizers.
+func TestOptimizeSyscallRule(t *testing.T) {
+	// av is a shorthand for `AnyValue{}`, used below to keep `PerArg`
+	// structs short enough to comfortably fit on one line.
+	av := AnyValue{}
+	for _, test := range []struct {
+		name       string
+		rule       SyscallRule
+		optimizers []ruleOptimizerFunc
+		want       SyscallRule
+	}{
+		{
+			name: "do nothing to a simple rule",
+			rule: PerArg{NotEqual(0xff), av, av, av, av, av, av},
+			want: PerArg{NotEqual(0xff), av, av, av, av, av, av},
+		},
+		{
+			name: "flatten Or rule",
+			rule: Or{
+				Or{
+					PerArg{EqualTo(0x11)},
+					Or{
+						PerArg{EqualTo(0x22)},
+						PerArg{EqualTo(0x33)},
+					},
+					PerArg{EqualTo(0x44)},
+				},
+				Or{
+					PerArg{EqualTo(0x55)},
+					PerArg{EqualTo(0x66)},
+				},
+			},
+			want: Or{
+				PerArg{EqualTo(0x11), av, av, av, av, av, av},
+				PerArg{EqualTo(0x22), av, av, av, av, av, av},
+				PerArg{EqualTo(0x33), av, av, av, av, av, av},
+				PerArg{EqualTo(0x44), av, av, av, av, av, av},
+				PerArg{EqualTo(0x55), av, av, av, av, av, av},
+				PerArg{EqualTo(0x66), av, av, av, av, av, av},
+			},
+		},
+		{
+			name: "flatten And rule",
+			rule: And{
+				And{
+					PerArg{NotEqual(0x11)},
+					And{
+						PerArg{NotEqual(0x22)},
+						PerArg{NotEqual(0x33)},
+					},
+					PerArg{NotEqual(0x44)},
+				},
+				And{
+					PerArg{NotEqual(0x55)},
+					PerArg{NotEqual(0x66)},
+				},
+			},
+			want: And{
+				PerArg{NotEqual(0x11), av, av, av, av, av, av},
+				PerArg{NotEqual(0x22), av, av, av, av, av, av},
+				PerArg{NotEqual(0x33), av, av, av, av, av, av},
+				PerArg{NotEqual(0x44), av, av, av, av, av, av},
+				PerArg{NotEqual(0x55), av, av, av, av, av, av},
+				PerArg{NotEqual(0x66), av, av, av, av, av, av},
+			},
+		},
+		{
+			name: "simplify Or with single rule",
+			rule: Or{
+				PerArg{EqualTo(0x11)},
+			},
+			want: PerArg{EqualTo(0x11), av, av, av, av, av, av},
+		},
+		{
+			name: "simplify And with single rule",
+			rule: And{
+				PerArg{EqualTo(0x11)},
+			},
+			want: PerArg{EqualTo(0x11), av, av, av, av, av, av},
+		},
+		{
+			name: "simplify Or with MatchAll",
+			rule: Or{
+				PerArg{EqualTo(0x11)},
+				Or{
+					MatchAll{},
+				},
+				PerArg{EqualTo(0x22)},
+			},
+			want: MatchAll{},
+		},
+		{
+			name: "single MatchAll in Or is not an empty rule",
+			rule: Or{
+				MatchAll{},
+				MatchAll{},
+			},
+			optimizers: []ruleOptimizerFunc{
+				convertMatchAllOrXToMatchAll,
+			},
+			want: MatchAll{},
+		},
+		{
+			name: "simplify And with MatchAll",
+			rule: And{
+				PerArg{NotEqual(0x11)},
+				And{
+					MatchAll{},
+				},
+				PerArg{NotEqual(0x22)},
+			},
+			want: And{
+				PerArg{NotEqual(0x11), av, av, av, av, av, av},
+				PerArg{NotEqual(0x22), av, av, av, av, av, av},
+			},
+		},
+		{
+			name: "single MatchAll in And is not optimized to an empty rule",
+			rule: And{
+				MatchAll{},
+				MatchAll{},
+			},
+			optimizers: []ruleOptimizerFunc{
+				convertMatchAllAndXToX,
+			},
+			want: MatchAll{},
+		},
+		{
+			name: "PerArg nil to AnyValue",
+			rule: PerArg{av, EqualTo(0)},
+			optimizers: []ruleOptimizerFunc{
+				nilInPerArgToAnyValue,
+			},
+			want: PerArg{av, EqualTo(0), av, av, av, av, av},
+		},
+		{
+			name: "Useless PerArg is MatchAll",
+			rule: PerArg{av, av},
+			optimizers: []ruleOptimizerFunc{
+				nilInPerArgToAnyValue,
+				convertUselessPerArgToMatchAll,
+			},
+			want: MatchAll{},
+		},
+		{
+			name: "Common value matchers in PerArg are extracted",
+			rule: Or{
+				PerArg{EqualTo(0xA1), EqualTo(0xB1), EqualTo(0xC1), EqualTo(0xD0)},
+				PerArg{EqualTo(0xA2), EqualTo(0xB1), EqualTo(0xC1), EqualTo(0xD0)},
+				PerArg{EqualTo(0xA1), EqualTo(0xB2), EqualTo(0xC2), EqualTo(0xD0)},
+				PerArg{EqualTo(0xA2), EqualTo(0xB2), EqualTo(0xC2), EqualTo(0xD0)},
+				PerArg{EqualTo(0xA1), EqualTo(0xB3), EqualTo(0xC3), EqualTo(0xD0)},
+				PerArg{EqualTo(0xA2), EqualTo(0xB3), EqualTo(0xC3), EqualTo(0xD0)},
+			},
+			want: And{
+				Or{
+					PerArg{EqualTo(0xA1), av, av, av, av, av, av},
+					PerArg{EqualTo(0xA2), av, av, av, av, av, av},
+				},
+				PerArg{av, av, av, EqualTo(0xD0), av, av, av},
+				Or{
+					PerArg{av, EqualTo(0xB1), EqualTo(0xC1), av, av, av, av},
+					PerArg{av, EqualTo(0xB2), EqualTo(0xC2), av, av, av, av},
+					PerArg{av, EqualTo(0xB3), EqualTo(0xC3), av, av, av, av},
+				},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got SyscallRule
+			if len(test.optimizers) == 0 {
+				got = optimizeSyscallRule(test.rule)
+			} else {
+				got = optimizeSyscallRuleFuncs(test.rule, test.optimizers)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Errorf("got rule:\n%v\nwant rule:\n%v\n", got, test.want)
 			}
 		})
 	}

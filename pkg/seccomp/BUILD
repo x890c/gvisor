@@ -11,6 +11,7 @@ go_library(
         "seccomp.go",
         "seccomp_amd64.go",
         "seccomp_arm64.go",
+        "seccomp_optimizer.go",
         "seccomp_rules.go",
         "seccomp_unsafe.go",
     ],
@@ -36,6 +37,5 @@ go_test(
     deps = [
         "//pkg/abi/linux",
         "//pkg/bpf",
-        "//pkg/hostarch",
     ],
 )

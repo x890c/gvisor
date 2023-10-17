@@ -11,6 +11,7 @@ go_library(
         "abi.go",
         "abi_linux.go",
         "flag.go",
+        "syscall.go",
     ],
     visibility = ["//:sandbox"],
 )
