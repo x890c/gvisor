@@ -20,7 +20,6 @@ import (
 	"math"
 	"math/rand"
 
-	"gvisor.dev/gvisor/pkg/atomicbitops"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -228,13 +227,6 @@ type PortManager struct {
 	ephemeralMu    sync.RWMutex
 	firstEphemeral uint16
 	numEphemeral   uint16
-
-	// hint is used to pick ports ephemeral ports in a stable order for
-	// a given port offset.
-	//
-	// hint must be accessed using the portHint/incPortHint helpers.
-	// TODO(gvisor.dev/issue/940): S/R this field.
-	hint atomicbitops.Uint32
 }
 
 // NewPortManager creates new PortManager.
@@ -263,33 +255,6 @@ func (pm *PortManager) PickEphemeralPort(rng *rand.Rand, testPort PortTester) (p
 
 	offset := uint32(rng.Int31n(int32(numEphemeral)))
 	return pickEphemeralPort(offset, firstEphemeral, numEphemeral, testPort)
-}
-
-// portHint atomically reads and returns the pm.hint value.
-func (pm *PortManager) portHint() uint32 {
-	return pm.hint.Load()
-}
-
-// incPortHint atomically increments pm.hint by 1.
-func (pm *PortManager) incPortHint() {
-	pm.hint.Add(1)
-}
-
-// PickEphemeralPortStable starts at the specified offset + pm.portHint and
-// iterates over all ephemeral ports, allowing the caller to decide whether a
-// given port is suitable for its needs and stopping when a port is found or an
-// error occurs.
-func (pm *PortManager) PickEphemeralPortStable(offset uint32, testPort PortTester) (port uint16, err tcpip.Error) {
-	pm.ephemeralMu.RLock()
-	firstEphemeral := pm.firstEphemeral
-	numEphemeral := pm.numEphemeral
-	pm.ephemeralMu.RUnlock()
-
-	p, err := pickEphemeralPort(pm.portHint()+offset, firstEphemeral, numEphemeral, testPort)
-	if err == nil {
-		pm.incPortHint()
-	}
-	return p, err
 }
 
 // pickEphemeralPort starts at the offset specified from the FirstEphemeral port
