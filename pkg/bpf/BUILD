@@ -17,7 +17,10 @@ go_library(
     ],
     imports = ["gvisor.dev/gvisor/pkg/abi/linux"],
     visibility = ["//visibility:public"],
-    deps = ["//pkg/abi/linux"],
+    deps = [
+        "//pkg/abi/linux",
+        "//pkg/hostarch",
+    ],
 )
 
 go_test(

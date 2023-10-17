@@ -1,5 +1,5 @@
 load("//test/secbench:defs.bzl", "secbench_test")
-load("//tools:defs.bzl", "go_library")
+load("//tools:defs.bzl", "go_library", "go_test")
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -38,6 +38,18 @@ go_library(
     ],
 )
 
+go_test(
+    name = "filter_test",
+    srcs = ["filter_test.go"],
+    library = ":filter",
+    deps = [
+        "//pkg/seccomp",
+        "//pkg/sentry/platform/kvm",
+        "//pkg/sentry/platform/systrap",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
+)
+
 secbench_test(
     name = "filter_bench_test",
     srcs = ["filter_bench_test.go"],
@@ -50,5 +62,17 @@ secbench_test(
         "//test/secbench",
         "//test/secbench/secbenchdef",
         "@org_golang_x_sys//unix:go_default_library",
+    ],
+)
+
+go_test(
+    name = "filter_fuzz_test",
+    srcs = ["filter_fuzz_test.go"],
+    deps = [
+        ":filter",
+        "//pkg/abi/linux",
+        "//pkg/seccomp",
+        "//pkg/sentry/platform/systrap",
+        "//test/secfuzz",
     ],
 )

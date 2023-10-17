@@ -32,11 +32,7 @@ const maxSyscallFilterInstructions = 1 << 15
 func dataAsBPFInput(t *Task, d *linux.SeccompData) bpf.Input {
 	buf := t.CopyScratchBuffer(d.SizeBytes())
 	d.MarshalUnsafe(buf)
-	return bpf.InputBytes{
-		Data: buf,
-		// Go-marshal always uses the native byte order.
-		Order: hostarch.ByteOrder,
-	}
+	return bpf.Input{Data: buf}
 }
 
 func seccompSiginfo(t *Task, errno, sysno int32, ip hostarch.Addr) *linux.SignalInfo {

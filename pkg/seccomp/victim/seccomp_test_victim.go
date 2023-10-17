@@ -107,7 +107,7 @@ func main() {
 		})
 	}
 
-	if err := seccomp.Install(syscalls, seccomp.NewSyscallRules()); err != nil {
+	if err := seccomp.Install(syscalls, seccomp.NewSyscallRules(), seccomp.ProgramOptions{}); err != nil {
 		fmt.Printf("Failed to install seccomp: %v\n", err)
 		os.Exit(1)
 	}
