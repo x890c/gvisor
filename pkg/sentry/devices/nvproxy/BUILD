@@ -39,6 +39,7 @@ go_library(
         "//pkg/errors/linuxerr",
         "//pkg/fdnotifier",
         "//pkg/hostarch",
+        "//pkg/lisafs",
         "//pkg/log",
         "//pkg/marshal",
         "//pkg/marshal/primitive",

@@ -18,14 +18,21 @@ package dev
 import (
 	"fmt"
 	"path"
+	"regexp"
+	"strconv"
 
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/abi/nvgpu"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
+	"gvisor.dev/gvisor/pkg/fd"
 	"gvisor.dev/gvisor/pkg/fspath"
+	"gvisor.dev/gvisor/pkg/lisafs"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
+	"gvisor.dev/gvisor/pkg/unet"
 )
 
 // Name is the dev filesystem name.
@@ -77,10 +84,25 @@ func (fst FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virtual
 	}); err != nil {
 		return nil, nil, err
 	}
+	var goferFD lisafs.ClientFD
+	if iopts.GoferFD != nil {
+		goferFD, err = connectClient(ctx, iopts.GoferFD.Release())
+		if err != nil {
+			return nil, nil, err
+		}
+		if iopts.CreateNvidiaFiles {
+			if err := createNvidiaFiles(ctx, vfsObj, creds, root, goferFD, iopts.NvidiaUVMDevMajor); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
 
-	root.Mount().Filesystem().IncRef()
-	root.Dentry().IncRef()
-	return root.Mount().Filesystem(), root.Dentry(), nil
+	fs, err := newFilesystem(ctx, vfsObj, root.Mount().Filesystem(), goferFD, iopts.UniqueID)
+	if err != nil {
+		return nil, nil, err
+	}
+	root.Dentry().IncRef() // transferred to caller, as required by
+	return &fs.vfsfs, root.Dentry(), nil
 }
 
 // Release implements vfs.FilesystemType.Release.
@@ -90,6 +112,153 @@ func (fst *FilesystemType) Release(ctx context.Context) {}
 type InternalData struct {
 	// ShmMode indicates the mode to create the /dev/shm dir with.
 	ShmMode *uint16
+	// GoferFD is the FD for the dev gofer connection.
+	GoferFD *fd.FD
+
+	// The following fields are only set when GoferFD is not nil.
+
+	// UniqueID is an optional opaque string used to reassociate the filesystem
+	// with a new server FD during restoration from checkpoint.
+	UniqueID string
+	// CreateNvidiaFiles indicates whether Nvidia device files should be created
+	// using information from the gofer.
+	CreateNvidiaFiles bool
+	// NvidiaUVMDevMajor is the device major number used for nvidia-uvm.
+	NvidiaUVMDevMajor uint32
+}
+
+// filesystem is a wrapper, which provides some devfs specific functionality.
+//
+// +stateify savable
+type filesystem struct {
+	vfsfs  vfs.Filesystem
+	baseFS *vfs.Filesystem
+	// This embedding is always baseFS.Impl().
+	vfs.FilesystemImpl
+
+	goferFD  lisafs.ClientFD `state:"nosave"`
+	uniqueID string
+}
+
+func newFilesystem(ctx context.Context, vfsObj *vfs.VirtualFilesystem, baseFS *vfs.Filesystem, goferFD lisafs.ClientFD, uniqueID string) (*filesystem, error) {
+	fs := filesystem{
+		baseFS:         baseFS,
+		FilesystemImpl: baseFS.Impl(),
+		goferFD:        goferFD,
+		uniqueID:       uniqueID,
+	}
+	fs.vfsfs.Init(vfsObj, baseFS.FilesystemType(), &fs)
+	fs.baseFS.IncRef() // Held by fs, and released in fs.Release().
+	return &fs, nil
+}
+
+// Release implements vfs.FilesystemImpl.Release.
+func (fs *filesystem) Release(ctx context.Context) {
+	fs.baseFS.DecRef(ctx)
+	if fs.goferFD.Ok() {
+		// Close the connection to the server. This implicitly closes all FDs.
+		fs.goferFD.Client().Close()
+	}
+}
+
+// OpenAt implements vfs.FilesystemImpl.OpenAt. We only intercept OpenAt so we
+// can make the device lisafs FD available to tmpfs.filesystem.OpenAt() ->
+// VirtualFilesystem.OpenDeviceSpecialFile() implementations.
+func (fs *filesystem) OpenAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
+	if fs.goferFD.Ok() {
+		// Inject our custom context, which also provides CtxDevGoferClientFD.
+		ctx = fs.wrapContext(ctx)
+	}
+	return fs.FilesystemImpl.OpenAt(ctx, rp, opts)
+}
+
+// connectClient establishes the LISAFS connection to the dev gofer server.
+// It takes ownership of fd.
+func connectClient(ctx context.Context, fd int) (lisafs.ClientFD, error) {
+	ctx.UninterruptibleSleepStart(false)
+	defer ctx.UninterruptibleSleepFinish(false)
+
+	sock, err := unet.NewSocket(fd)
+	if err != nil {
+		ctx.Warningf("failed to create socket for dev gofer client: %v", err)
+		return lisafs.ClientFD{}, err
+	}
+	client, rootInode, rootHostFD, err := lisafs.NewClient(sock)
+	if err != nil {
+		ctx.Warningf("failed to create dev gofer client: %v", err)
+		return lisafs.ClientFD{}, err
+	}
+	if rootHostFD >= 0 {
+		_ = unix.Close(rootHostFD)
+	}
+	return client.NewFD(rootInode.ControlFD), nil
+}
+
+func createNvidiaFiles(ctx context.Context, vfsObj *vfs.VirtualFilesystem, creds *auth.Credentials, root vfs.VirtualDentry, goferFD lisafs.ClientFD, uvmDevMajor uint32) error {
+	const nvidiaDevMode = linux.FileMode(linux.S_IFCHR | 0666)
+	if err := CreateDeviceFile(ctx, vfsObj, creds, root, "nvidiactl", nvgpu.NV_MAJOR_DEVICE_NUMBER, nvgpu.NV_CONTROL_DEVICE_MINOR, nvidiaDevMode, nil /* uid */, nil /* gid */); err != nil {
+		return err
+	}
+	if err := CreateDeviceFile(ctx, vfsObj, creds, root, "nvidia-uvm", uvmDevMajor, nvgpu.NVIDIA_UVM_PRIMARY_MINOR_NUMBER, nvidiaDevMode, nil /* uid */, nil /* gid */); err != nil {
+		return err
+	}
+	client := goferFD.Client()
+	openFDID, _, err := goferFD.OpenAt(ctx, unix.O_RDONLY)
+	if err != nil {
+		return fmt.Errorf("failed to open dev from gofer: %v", err)
+	}
+	defer client.CloseFD(ctx, openFDID, true /* flush */)
+	openFD := client.NewFD(openFDID)
+	nvidiaDeviceRegex := regexp.MustCompile(`^nvidia(\d+)$`)
+	const count = int32(64 * 1024)
+	for {
+		dirents, err := openFD.Getdents64(ctx, count)
+		if err != nil {
+			return fmt.Errorf("failed to get dirents: %v", err)
+		}
+		if len(dirents) == 0 {
+			break
+		}
+		for i := range dirents {
+			name := string(dirents[i].Name)
+			ms := nvidiaDeviceRegex.FindStringSubmatch(name)
+			if ms == nil {
+				continue
+			}
+			minor, err := strconv.ParseUint(ms[1], 10, 32)
+			if err != nil {
+				return fmt.Errorf("invalid nvidia device name %q: %w", name, err)
+			}
+			if err := CreateDeviceFile(ctx, vfsObj, creds, root, fmt.Sprintf("nvidia%d", minor), nvgpu.NV_MAJOR_DEVICE_NUMBER, uint32(minor), nvidiaDevMode, nil /* uid */, nil /* gid */); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// filesystemContext implements context.Context by extending an existing
+// context.Context with filesystem.
+type filesystemContext struct {
+	context.Context
+	fs *filesystem
+}
+
+func (fs *filesystem) wrapContext(ctx context.Context) *filesystemContext {
+	return &filesystemContext{
+		Context: ctx,
+		fs:      fs,
+	}
+}
+
+// Value implements context.Context.Value.
+func (fc *filesystemContext) Value(key any) any {
+	switch key {
+	case vfs.CtxDevGoferClientFD:
+		return fc.fs.goferFD
+	default:
+		return fc.Context.Value(key)
+	}
 }
 
 func pathOperationAt(root vfs.VirtualDentry, pathname string) *vfs.PathOperation {

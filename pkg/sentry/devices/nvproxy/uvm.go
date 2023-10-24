@@ -23,6 +23,7 @@ import (
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/fdnotifier"
 	"gvisor.dev/gvisor/pkg/hostarch"
+	"gvisor.dev/gvisor/pkg/lisafs"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/marshal"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
@@ -41,7 +42,13 @@ type uvmDevice struct {
 
 // Open implements vfs.Device.Open.
 func (dev *uvmDevice) Open(ctx context.Context, mnt *vfs.Mount, vfsd *vfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
-	hostFD, err := unix.Openat(-1, "/dev/nvidia-uvm", int((opts.Flags&unix.O_ACCMODE)|unix.O_NOFOLLOW), 0)
+	devFD := ctx.Value(vfs.CtxDevGoferClientFD)
+	if devFD == nil {
+		log.Warningf("vfs.CtxDevGoferClientFD is not set")
+		return nil, linuxerr.ENOENT
+	}
+	devClientFD := devFD.(lisafs.ClientFD)
+	hostFD, err := openFromGofer(ctx, devClientFD, "nvidia-uvm", opts.Flags&unix.O_ACCMODE)
 	if err != nil {
 		ctx.Warningf("nvproxy: failed to open host /dev/nvidia-uvm: %v", err)
 		return nil, err

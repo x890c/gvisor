@@ -26,6 +26,7 @@ import (
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/fdnotifier"
 	"gvisor.dev/gvisor/pkg/hostarch"
+	"gvisor.dev/gvisor/pkg/lisafs"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
@@ -46,15 +47,21 @@ type frontendDevice struct {
 
 // Open implements vfs.Device.Open.
 func (dev *frontendDevice) Open(ctx context.Context, mnt *vfs.Mount, vfsd *vfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
-	var hostPath string
-	if dev.minor == nvgpu.NV_CONTROL_DEVICE_MINOR {
-		hostPath = "/dev/nvidiactl"
-	} else {
-		hostPath = fmt.Sprintf("/dev/nvidia%d", dev.minor)
+	devFD := ctx.Value(vfs.CtxDevGoferClientFD)
+	if devFD == nil {
+		log.Warningf("vfs.CtxDevGoferClientFD is not set")
+		return nil, linuxerr.ENOENT
 	}
-	hostFD, err := unix.Openat(-1, hostPath, int((opts.Flags&unix.O_ACCMODE)|unix.O_NOFOLLOW), 0)
+	devClientFD := devFD.(lisafs.ClientFD)
+	var devName string
+	if dev.minor == nvgpu.NV_CONTROL_DEVICE_MINOR {
+		devName = "nvidiactl"
+	} else {
+		devName = fmt.Sprintf("nvidia%d", dev.minor)
+	}
+	hostFD, err := openFromGofer(ctx, devClientFD, devName, opts.Flags&unix.O_ACCMODE)
 	if err != nil {
-		ctx.Warningf("nvproxy: failed to open host %s: %v", hostPath, err)
+		ctx.Warningf("nvproxy: failed to open host %s: %v", devName, err)
 		return nil, err
 	}
 	fd := &frontendFD{

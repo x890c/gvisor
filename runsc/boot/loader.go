@@ -112,6 +112,9 @@ type containerInfo struct {
 	// goferFDs are the FDs that attach the sandbox to the gofers.
 	goferFDs []*fd.FD
 
+	// devGoferFD is the FD for the dev gofer connection.
+	devGoferFD *fd.FD
+
 	// goferFilestoreFDs are FDs to the regular files that will back the tmpfs or
 	// overlayfs mount for certain gofer mounts.
 	goferFilestoreFDs []*fd.FD
@@ -124,9 +127,8 @@ type containerInfo struct {
 	// nvidiaUVMDevMajor is the device major number used for nvidia-uvm.
 	nvidiaUVMDevMajor uint32
 
-	// nvidiaDevMinors is a list of device minors for Nvidia GPU devices exposed
-	// to the sandbox.
-	nvidiaDevMinors NvidiaDevMinors
+	// nvidiaDriverVersion is the Nvidia driver version on the host.
+	nvidiaDriverVersion string
 }
 
 // Loader keeps state needed to start the kernel and run the container.
@@ -166,9 +168,6 @@ type Loader struct {
 	// productName is the value to show in
 	// /sys/devices/virtual/dmi/id/product_name.
 	productName string
-
-	// nvidiaUVMDevMajor is the device major number used for nvidia-uvm.
-	nvidiaUVMDevMajor uint32
 
 	// mu guards the fields below.
 	mu sync.Mutex
@@ -250,6 +249,9 @@ type Args struct {
 	// GoferFDs is an array of FDs used to connect with the Gofer. The Loader
 	// takes ownership of these FDs and may close them at any time.
 	GoferFDs []int
+	// DevGoferFD is the FD for the dev gofer connection. The Loader takes
+	// ownership of this FD and may close it at any time.
+	DevGoferFD int
 	// StdioFDs is the stdio for the application. The Loader takes ownership of
 	// these FDs and may close them at any time.
 	StdioFDs []int
@@ -286,9 +288,8 @@ type Args struct {
 	// ProfileOpts contains the set of profiles to enable and the
 	// corresponding FDs where profile data will be written.
 	ProfileOpts profile.Opts
-	// NvidiaDevMinors is a list of device minors for Nvidia GPU devices exposed
-	// to the sandbox.
-	NvidiaDevMinors NvidiaDevMinors
+	// NvidiaDriverVersion is the Nvidia driver version on the host.
+	NvidiaDriverVersion string
 }
 
 // make sure stdioFDs are always the same on initial start and on restore
@@ -319,10 +320,10 @@ func New(args Args) (*Loader, error) {
 	kernel.IOUringEnabled = args.Conf.IOUring
 
 	info := containerInfo{
-		conf:            args.Conf,
-		spec:            args.Spec,
-		goferMountConfs: args.GoferMountConfs,
-		nvidiaDevMinors: args.NvidiaDevMinors,
+		conf:                args.Conf,
+		spec:                args.Spec,
+		goferMountConfs:     args.GoferMountConfs,
+		nvidiaDriverVersion: args.NvidiaDriverVersion,
 	}
 
 	// Make host FDs stable between invocations. Host FDs must map to the exact
@@ -349,6 +350,9 @@ func New(args Args) (*Loader, error) {
 	}
 	for _, goferFD := range args.GoferFDs {
 		info.goferFDs = append(info.goferFDs, fd.New(goferFD))
+	}
+	if args.DevGoferFD >= 0 {
+		info.devGoferFD = fd.New(args.DevGoferFD)
 	}
 	for _, filestoreFD := range args.GoferFilestoreFDs {
 		info.goferFilestoreFDs = append(info.goferFilestoreFDs, fd.New(filestoreFD))
@@ -511,16 +515,15 @@ func New(args Args) (*Loader, error) {
 
 	eid := execID{cid: args.ID}
 	l := &Loader{
-		k:                 k,
-		watchdog:          dog,
-		sandboxID:         args.ID,
-		processes:         map[execID]*execProcess{eid: {}},
-		mountHints:        mountHints,
-		sharedMounts:      make(map[string]*vfs.Mount),
-		root:              info,
-		stopProfiling:     stopProfiling,
-		productName:       args.ProductName,
-		nvidiaUVMDevMajor: info.nvidiaUVMDevMajor,
+		k:             k,
+		watchdog:      dog,
+		sandboxID:     args.ID,
+		processes:     map[execID]*execProcess{eid: {}},
+		mountHints:    mountHints,
+		sharedMounts:  make(map[string]*vfs.Mount),
+		root:          info,
+		stopProfiling: stopProfiling,
+		productName:   args.ProductName,
 	}
 
 	// We don't care about child signals; some platforms can generate a
@@ -620,6 +623,9 @@ func (l *Loader) Destroy() {
 	}
 	for _, f := range l.root.goferFilestoreFDs {
 		_ = f.Close()
+	}
+	if l.root.devGoferFD != nil {
+		_ = l.root.devGoferFD.Close()
 	}
 
 	l.stopProfiling()
@@ -806,7 +812,7 @@ func (l *Loader) createSubcontainer(cid string, tty *fd.FD) error {
 // startSubcontainer starts a child container. It returns the thread group ID of
 // the newly created process. Used FDs are either closed or released. It's safe
 // for the caller to close any remaining files upon return.
-func (l *Loader) startSubcontainer(spec *specs.Spec, conf *config.Config, cid string, stdioFDs, goferFDs, goferFilestoreFDs []*fd.FD, goferMountConfs []GoferMountConf) error {
+func (l *Loader) startSubcontainer(spec *specs.Spec, conf *config.Config, cid string, stdioFDs, goferFDs, goferFilestoreFDs []*fd.FD, devGoferFD *fd.FD, goferMountConfs []GoferMountConf) error {
 	// Create capabilities.
 	caps, err := specutils.Capabilities(conf.EnableRaw, spec.Process.Capabilities)
 	if err != nil {
@@ -859,13 +865,14 @@ func (l *Loader) startSubcontainer(spec *specs.Spec, conf *config.Config, cid st
 	}
 
 	info := &containerInfo{
-		conf:              conf,
-		spec:              spec,
-		goferFDs:          goferFDs,
-		goferFilestoreFDs: goferFilestoreFDs,
-		goferMountConfs:   goferMountConfs,
-		nvidiaUVMDevMajor: l.nvidiaUVMDevMajor,
-		nvidiaDevMinors:   l.root.nvidiaDevMinors,
+		conf:                conf,
+		spec:                spec,
+		goferFDs:            goferFDs,
+		devGoferFD:          devGoferFD,
+		goferFilestoreFDs:   goferFilestoreFDs,
+		goferMountConfs:     goferMountConfs,
+		nvidiaUVMDevMajor:   l.root.nvidiaUVMDevMajor,
+		nvidiaDriverVersion: l.root.nvidiaDriverVersion,
 	}
 	info.procArgs, err = createProcessArgs(cid, spec, creds, l.k, pidns)
 	if err != nil {

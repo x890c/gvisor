@@ -24,6 +24,7 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/nvgpu"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/hostarch"
+	"gvisor.dev/gvisor/pkg/lisafs"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/marshal"
 	"gvisor.dev/gvisor/pkg/sentry/mm"
@@ -31,14 +32,10 @@ import (
 )
 
 // Register registers all devices implemented by this package in vfsObj.
-func Register(vfsObj *vfs.VirtualFilesystem, uvmDevMajor uint32) error {
+func Register(vfsObj *vfs.VirtualFilesystem, versionStr string, uvmDevMajor uint32) error {
 	// The kernel driver's interface is unstable, so only allow versions of the
 	// driver that are known to be supported.
-	versionStr, err := hostDriverVersion()
-	if err != nil {
-		return fmt.Errorf("failed to get Nvidia driver version: %w", err)
-	}
-	log.Debugf("NVIDIA driver version: %s", versionStr)
+	log.Infof("NVIDIA driver version: %s", versionStr)
 	version, err := DriverVersionFrom(versionStr)
 	if err != nil {
 		return fmt.Errorf("failed to parse Nvidia driver version %s: %w", versionStr, err)
@@ -119,4 +116,30 @@ type marshalPtr[T any] interface {
 
 func addrFromP64(p nvgpu.P64) hostarch.Addr {
 	return hostarch.Addr(uintptr(uint64(p)))
+}
+
+func openFromGofer(ctx context.Context, devFD lisafs.ClientFD, name string, flags uint32) (int, error) {
+	// TODO(ayushranjan): This can be optimized with directfs. Don't discard the
+	// dirfd returned by Mount RPC. If one is provided, use that to walk and open
+	// devices. Directfs seccomp filters will allow it. This method is slow
+	// (requires 3 RPCs) and maybe add a lot of overhead for GPU applications
+	// that repeatedly open the device files. Create an abstraction that can be
+	// used for TPUs too.
+	childInode, err := devFD.Walk(ctx, name)
+	if err != nil {
+		log.Infof("failed to walk %q from dev gofer FD", name)
+		return 0, err
+	}
+	client := devFD.Client()
+	childFD := client.NewFD(childInode.ControlFD)
+
+	childOpenFD, childHostFD, err := childFD.OpenAt(ctx, flags)
+	if err != nil {
+		log.Infof("failed to open %q from child FD", name)
+		client.CloseFD(ctx, childFD.ID(), true /* flush */)
+		return 0, err
+	}
+	client.CloseFD(ctx, childFD.ID(), false /* flush */)
+	client.CloseFD(ctx, childOpenFD, true /* flush */)
+	return childHostFD, nil
 }

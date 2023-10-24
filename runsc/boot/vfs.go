@@ -26,7 +26,6 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/abi/nvgpu"
 	"gvisor.dev/gvisor/pkg/abi/tpu"
 	"gvisor.dev/gvisor/pkg/cleanup"
 	"gvisor.dev/gvisor/pkg/context"
@@ -354,6 +353,9 @@ type containerMounter struct {
 	// goferFDs is the list of FDs to be dispensed for gofer mounts.
 	goferFDs fdDispenser
 
+	// devGoferFD is the FD for the dev gofer connection.
+	devGoferFD *fd.FD
+
 	// goferFilestoreFDs are FDs to the regular files that will back the tmpfs or
 	// overlayfs mount for certain gofer mounts.
 	goferFilestoreFDs fdDispenser
@@ -378,6 +380,9 @@ type containerMounter struct {
 
 	// sandboxID is the ID for the whole sandbox.
 	sandboxID string
+
+	// nvidiaUVMDevMajor is the device major number used for nvidia-uvm.
+	nvidiaUVMDevMajor uint32
 }
 
 func newContainerMounter(info *containerInfo, k *kernel.Kernel, hints *PodMountHints, sharedMounts map[string]*vfs.Mount, productName string, sandboxID string) *containerMounter {
@@ -385,6 +390,7 @@ func newContainerMounter(info *containerInfo, k *kernel.Kernel, hints *PodMountH
 		root:              info.spec.Root,
 		mounts:            compileMounts(info.spec, info.conf),
 		goferFDs:          fdDispenser{fds: info.goferFDs},
+		devGoferFD:        info.devGoferFD,
 		goferFilestoreFDs: fdDispenser{fds: info.goferFilestoreFDs},
 		goferMountConfs:   info.goferMountConfs,
 		k:                 k,
@@ -392,6 +398,7 @@ func newContainerMounter(info *containerInfo, k *kernel.Kernel, hints *PodMountH
 		sharedMounts:      sharedMounts,
 		productName:       productName,
 		sandboxID:         sandboxID,
+		nvidiaUVMDevMajor: info.nvidiaUVMDevMajor,
 	}
 }
 
@@ -401,6 +408,11 @@ func (c *containerMounter) checkDispenser() error {
 	}
 	if !c.goferFilestoreFDs.empty() {
 		return fmt.Errorf("not all gofer Filestore FDs were consumed, remaining: %v", c.goferFilestoreFDs)
+	}
+	if c.devGoferFD != nil {
+		if fd := c.devGoferFD.FD(); fd >= 0 {
+			return fmt.Errorf("/dev gofer FD was not consumed, got: %d", fd)
+		}
 	}
 	return nil
 }
@@ -696,6 +708,7 @@ func (c *containerMounter) mountSubmounts(ctx context.Context, spec *specs.Spec,
 type mountInfo struct {
 	mount          *specs.Mount
 	goferFD        *fd.FD
+	devGoferFD     *fd.FD
 	hint           *MountHint
 	goferMountConf GoferMountConf
 	filestoreFD    *fd.FD
@@ -726,6 +739,10 @@ func (c *containerMounter) prepareMounts() ([]mountInfo, error) {
 			}
 			goferMntIdx++
 		}
+		if info.mount.Destination == "/dev" && c.devGoferFD != nil {
+			info.devGoferFD = c.devGoferFD
+			c.devGoferFD = nil
+		}
 		mounts = append(mounts, info)
 	}
 	if err := c.checkDispenser(); err != nil {
@@ -741,7 +758,7 @@ func (c *containerMounter) prepareMounts() ([]mountInfo, error) {
 }
 
 func (c *containerMounter) mountSubmount(ctx context.Context, spec *specs.Spec, conf *config.Config, mns *vfs.MountNamespace, creds *auth.Credentials, submount *mountInfo) (*vfs.Mount, error) {
-	fsName, opts, err := getMountNameAndOptions(spec, conf, submount, c.productName)
+	fsName, opts, err := c.getMountNameAndOptions(spec, conf, submount)
 	if err != nil {
 		return nil, fmt.Errorf("mountOptions failed: %w", err)
 	}
@@ -782,7 +799,7 @@ func (c *containerMounter) mountSubmount(ctx context.Context, spec *specs.Spec, 
 
 // getMountNameAndOptions retrieves the fsName, opts, and useOverlay values
 // used for mounts.
-func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo, productName string) (string, *vfs.MountOptions, error) {
+func (c *containerMounter) getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo) (string, *vfs.MountOptions, error) {
 	fsName := m.mount.Type
 	var (
 		data         []string
@@ -791,16 +808,28 @@ func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo,
 
 	// Find filesystem name and FS specific data field.
 	switch m.mount.Type {
-	case devpts.Name, dev.Name, proc.Name:
+	case devpts.Name, proc.Name:
 		// Nothing to do.
+
+	case dev.Name:
+		if m.devGoferFD != nil {
+			internalData = dev.InternalData{
+				GoferFD:  m.devGoferFD,
+				UniqueID: m.mount.Destination,
+				// In Docker mode, devices are not injected into spec.Linux.Devices. So
+				// manually create appropriate device files.
+				CreateNvidiaFiles: conf.NVProxyDocker,
+				NvidiaUVMDevMajor: c.nvidiaUVMDevMajor,
+			}
+		}
 
 	case Nonefs:
 		fsName = sys.Name
 
 	case sys.Name:
 		sysData := &sys.InternalData{EnableAccelSysfs: specutils.TPUProxyIsEnabled(spec, conf)}
-		if len(productName) > 0 {
-			sysData.ProductName = productName
+		if len(c.productName) > 0 {
+			sysData.ProductName = c.productName
 		}
 		internalData = sysData
 
@@ -984,7 +1013,7 @@ func (c *containerMounter) mountSharedMaster(ctx context.Context, spec *specs.Sp
 	// Mount the master using the options from the hint (mount annotations).
 	origOpts := mntInfo.mount.Options
 	mntInfo.mount.Options = mntInfo.hint.Mount.Options
-	fsName, opts, err := getMountNameAndOptions(spec, conf, mntInfo, c.productName)
+	fsName, opts, err := c.getMountNameAndOptions(spec, conf, mntInfo)
 	mntInfo.mount.Options = origOpts
 	if err != nil {
 		return nil, err
@@ -1061,6 +1090,12 @@ func (c *containerMounter) configureRestore(ctx context.Context) (context.Contex
 			fdmap[submount.mount.Destination] = submount.goferFD.Release()
 		}
 	}
+	if c.devGoferFD != nil {
+		if _, ok := fdmap["/dev"]; ok {
+			panic("/dev exists as a bind mount")
+		}
+		fdmap["/dev"] = c.devGoferFD.Release()
+	}
 	return context.WithValue(ctx, vfs.CtxRestoreFilesystemFDMap, fdmap), nil
 }
 
@@ -1069,23 +1104,6 @@ func createDeviceFiles(ctx context.Context, creds *auth.Credentials, info *conta
 		// Create any device files specified in the spec.
 		for _, dev := range info.spec.Linux.Devices {
 			if err := createDeviceFile(ctx, creds, info, vfsObj, root, dev); err != nil {
-				return err
-			}
-		}
-	}
-	if specutils.GPUFunctionalityRequested(info.spec, info.conf) && info.conf.NVProxyDocker {
-		// In Docker mode, devices are not injected into spec.Linux.Devices. So
-		// manually create appropriate device files.
-		mode := os.FileMode(0666)
-		nvidiaDevs := []specs.LinuxDevice{
-			specs.LinuxDevice{Path: "/dev/nvidiactl", Type: "c", Major: nvgpu.NV_MAJOR_DEVICE_NUMBER, Minor: nvgpu.NV_CONTROL_DEVICE_MINOR, FileMode: &mode},
-			specs.LinuxDevice{Path: "/dev/nvidia-uvm", Type: "c", Major: int64(info.nvidiaUVMDevMajor), Minor: nvgpu.NVIDIA_UVM_PRIMARY_MINOR_NUMBER, FileMode: &mode},
-		}
-		for _, minor := range info.nvidiaDevMinors {
-			nvidiaDevs = append(nvidiaDevs, specs.LinuxDevice{Path: fmt.Sprintf("/dev/nvidia%d", minor), Type: "c", Major: nvgpu.NV_MAJOR_DEVICE_NUMBER, Minor: int64(minor), FileMode: &mode})
-		}
-		for _, nvidiaDev := range nvidiaDevs {
-			if err := createDeviceFile(ctx, creds, info, vfsObj, root, nvidiaDev); err != nil {
 				return err
 			}
 		}
@@ -1165,14 +1183,14 @@ func tpuProxyRegisterDevices(info *containerInfo, vfsObj *vfs.VirtualFilesystem)
 }
 
 func nvproxyRegisterDevices(info *containerInfo, vfsObj *vfs.VirtualFilesystem) error {
-	if !specutils.GPUFunctionalityRequested(info.spec, info.conf) {
+	if !specutils.NVProxyEnabled(info.spec, info.conf) {
 		return nil
 	}
 	uvmDevMajor, err := vfsObj.GetDynamicCharDevMajor()
 	if err != nil {
 		return fmt.Errorf("reserving device major number for nvidia-uvm: %w", err)
 	}
-	if err := nvproxy.Register(vfsObj, uvmDevMajor); err != nil {
+	if err := nvproxy.Register(vfsObj, info.nvidiaDriverVersion, uvmDevMajor); err != nil {
 		return fmt.Errorf("registering nvproxy driver: %w", err)
 	}
 	info.nvidiaUVMDevMajor = uvmDevMajor

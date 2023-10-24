@@ -19,7 +19,6 @@ go_library(
         "loader.go",
         "mount_hints.go",
         "network.go",
-        "nvidia.go",
         "seccheck.go",
         "strace.go",
         "vfs.go",
@@ -32,7 +31,6 @@ go_library(
     deps = [
         "//pkg/abi",
         "//pkg/abi/linux",
-        "//pkg/abi/nvgpu",
         "//pkg/abi/tpu",
         "//pkg/bpf",
         "//pkg/cleanup",

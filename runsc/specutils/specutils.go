@@ -575,14 +575,14 @@ func TPUProxyIsEnabled(spec *specs.Spec, conf *config.Config) bool {
 		return true
 	}
 	val, ok := spec.Annotations[annotationTPU]
-	if ok {
-		ret, err := strconv.ParseBool(val)
-		if val != "" && err != nil {
-			log.Warningf("tpuproxy annotation set to invalid value %q. Skipping.", val)
-		}
-		return ret
+	if !ok {
+		return false
 	}
-	return false
+	ret, err := strconv.ParseBool(val)
+	if err != nil {
+		log.Warningf("tpuproxy annotation set to invalid value %q: %w. Skipping.", val, err)
+	}
+	return ret
 }
 
 // SafeSetupAndMount creates the mount point and calls Mount with the given
