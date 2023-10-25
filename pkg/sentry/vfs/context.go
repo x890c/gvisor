@@ -32,6 +32,9 @@ const (
 	// mapping filesystem unique IDs (cf. gofer.InternalFilesystemOptions.UniqueID)
 	// to host FDs.
 	CtxRestoreFilesystemFDMap
+
+	// CtxDevGoferClientFD is a Context.Value key for a /dev gofer client FD.
+	CtxDevGoferClientFD
 )
 
 // MountNamespaceFromContext returns the MountNamespace used by ctx. If ctx is

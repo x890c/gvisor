@@ -924,7 +924,9 @@ type fileDescription struct {
 }
 
 func (fd *fileDescription) filesystem() *filesystem {
-	return fd.vfsfd.Mount().Filesystem().Impl().(*filesystem)
+	// Note that we can't just use fd.vfsfd.Mount().Filesystem() because it may
+	// not be tmpfs, instead a tmpfs wrapper.
+	return fd.dentry().inode.fs
 }
 
 func (fd *fileDescription) dentry() *dentry {

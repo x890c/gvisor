@@ -112,6 +112,9 @@ type containerInfo struct {
 	// goferFDs are the FDs that attach the sandbox to the gofers.
 	goferFDs []*fd.FD
 
+	// devGoferFD is the FD for the dev gofer connection.
+	devGoferFD *fd.FD
+
 	// goferFilestoreFDs are FDs to the regular files that will back the tmpfs or
 	// overlayfs mount for certain gofer mounts.
 	goferFilestoreFDs []*fd.FD
@@ -166,9 +169,6 @@ type Loader struct {
 	// productName is the value to show in
 	// /sys/devices/virtual/dmi/id/product_name.
 	productName string
-
-	// nvidiaUVMDevMajor is the device major number used for nvidia-uvm.
-	nvidiaUVMDevMajor uint32
 
 	// mu guards the fields below.
 	mu sync.Mutex
@@ -250,6 +250,9 @@ type Args struct {
 	// GoferFDs is an array of FDs used to connect with the Gofer. The Loader
 	// takes ownership of these FDs and may close them at any time.
 	GoferFDs []int
+	// DevGoferFD is the FD for the dev gofer connection. The Loader takes
+	// ownership of this FD and may close it at any time.
+	DevGoferFD int
 	// StdioFDs is the stdio for the application. The Loader takes ownership of
 	// these FDs and may close them at any time.
 	StdioFDs []int
@@ -349,6 +352,9 @@ func New(args Args) (*Loader, error) {
 	}
 	for _, goferFD := range args.GoferFDs {
 		info.goferFDs = append(info.goferFDs, fd.New(goferFD))
+	}
+	if args.DevGoferFD >= 0 {
+		info.devGoferFD = fd.New(args.DevGoferFD)
 	}
 	for _, filestoreFD := range args.GoferFilestoreFDs {
 		info.goferFilestoreFDs = append(info.goferFilestoreFDs, fd.New(filestoreFD))
@@ -511,16 +517,15 @@ func New(args Args) (*Loader, error) {
 
 	eid := execID{cid: args.ID}
 	l := &Loader{
-		k:                 k,
-		watchdog:          dog,
-		sandboxID:         args.ID,
-		processes:         map[execID]*execProcess{eid: {}},
-		mountHints:        mountHints,
-		sharedMounts:      make(map[string]*vfs.Mount),
-		root:              info,
-		stopProfiling:     stopProfiling,
-		productName:       args.ProductName,
-		nvidiaUVMDevMajor: info.nvidiaUVMDevMajor,
+		k:             k,
+		watchdog:      dog,
+		sandboxID:     args.ID,
+		processes:     map[execID]*execProcess{eid: {}},
+		mountHints:    mountHints,
+		sharedMounts:  make(map[string]*vfs.Mount),
+		root:          info,
+		stopProfiling: stopProfiling,
+		productName:   args.ProductName,
 	}
 
 	// We don't care about child signals; some platforms can generate a
@@ -620,6 +625,9 @@ func (l *Loader) Destroy() {
 	}
 	for _, f := range l.root.goferFilestoreFDs {
 		_ = f.Close()
+	}
+	if l.root.devGoferFD != nil {
+		_ = l.root.devGoferFD.Close()
 	}
 
 	l.stopProfiling()
@@ -806,7 +814,7 @@ func (l *Loader) createSubcontainer(cid string, tty *fd.FD) error {
 // startSubcontainer starts a child container. It returns the thread group ID of
 // the newly created process. Used FDs are either closed or released. It's safe
 // for the caller to close any remaining files upon return.
-func (l *Loader) startSubcontainer(spec *specs.Spec, conf *config.Config, cid string, stdioFDs, goferFDs, goferFilestoreFDs []*fd.FD, goferMountConfs []GoferMountConf) error {
+func (l *Loader) startSubcontainer(spec *specs.Spec, conf *config.Config, cid string, stdioFDs, goferFDs, goferFilestoreFDs []*fd.FD, devGoferFD *fd.FD, goferMountConfs []GoferMountConf) error {
 	// Create capabilities.
 	caps, err := specutils.Capabilities(conf.EnableRaw, spec.Process.Capabilities)
 	if err != nil {
@@ -862,9 +870,10 @@ func (l *Loader) startSubcontainer(spec *specs.Spec, conf *config.Config, cid st
 		conf:              conf,
 		spec:              spec,
 		goferFDs:          goferFDs,
+		devGoferFD:        devGoferFD,
 		goferFilestoreFDs: goferFilestoreFDs,
 		goferMountConfs:   goferMountConfs,
-		nvidiaUVMDevMajor: l.nvidiaUVMDevMajor,
+		nvidiaUVMDevMajor: l.root.nvidiaUVMDevMajor,
 		nvidiaDevMinors:   l.root.nvidiaDevMinors,
 	}
 	info.procArgs, err = createProcessArgs(cid, spec, creds, l.k, pidns)

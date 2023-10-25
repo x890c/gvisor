@@ -296,7 +296,7 @@ func New(conf *config.Config, args Args) (*Container, error) {
 			return nil, err
 		}
 		if err := runInCgroup(containerCgroup, func() error {
-			ioFiles, specFile, err := c.createGoferProcess(args.Spec, conf, args.BundleDir, args.Attached)
+			ioFiles, devIOFile, specFile, err := c.createGoferProcess(args.Spec, conf, args.BundleDir, args.Attached)
 			if err != nil {
 				return fmt.Errorf("cannot create gofer process: %w", err)
 			}
@@ -310,6 +310,7 @@ func New(conf *config.Config, args Args) (*Container, error) {
 				ConsoleSocket:       args.ConsoleSocket,
 				UserLog:             args.UserLog,
 				IOFiles:             ioFiles,
+				DevIOFile:           devIOFile,
 				MountsFile:          specFile,
 				Cgroup:              containerCgroup,
 				Attached:            args.Attached,
@@ -458,12 +459,15 @@ func (c *Container) Start(conf *config.Config) error {
 		// the start (and all their children processes).
 		if err := runInCgroup(c.Sandbox.CgroupJSON.Cgroup, func() error {
 			// Create the gofer process.
-			goferFiles, mountsFile, err := c.createGoferProcess(c.Spec, conf, c.BundleDir, false)
+			goferFiles, devIOFile, mountsFile, err := c.createGoferProcess(c.Spec, conf, c.BundleDir, false)
 			if err != nil {
 				return err
 			}
 			defer func() {
 				_ = mountsFile.Close()
+				if devIOFile != nil {
+					_ = devIOFile.Close()
+				}
 				for _, f := range goferFiles {
 					_ = f.Close()
 				}
@@ -485,7 +489,7 @@ func (c *Container) Start(conf *config.Config) error {
 				stdios = []*os.File{os.Stdin, os.Stdout, os.Stderr}
 			}
 
-			return c.Sandbox.StartSubcontainer(c.Spec, conf, c.ID, stdios, goferFiles, goferFilestores, goferConfs)
+			return c.Sandbox.StartSubcontainer(c.Spec, conf, c.ID, stdios, goferFiles, goferFilestores, devIOFile, goferConfs)
 		}); err != nil {
 			return err
 		}
@@ -1129,12 +1133,12 @@ func (c *Container) waitForStopped() error {
 	return backoff.Retry(op, b)
 }
 
-func (c *Container) createGoferProcess(spec *specs.Spec, conf *config.Config, bundleDir string, attached bool) ([]*os.File, *os.File, error) {
+func (c *Container) createGoferProcess(spec *specs.Spec, conf *config.Config, bundleDir string, attached bool) ([]*os.File, *os.File, *os.File, error) {
 	donations := donation.Agency{}
 	defer donations.Close()
 
 	if err := donations.OpenAndDonate("log-fd", conf.LogFilename, os.O_CREATE|os.O_WRONLY|os.O_APPEND); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if conf.DebugLog != "" {
 		test := ""
@@ -1146,7 +1150,7 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *config.Config, bu
 		}
 		if specutils.IsDebugCommand(conf, "gofer") {
 			if err := donations.DonateDebugLogFile("debug-log-fd", conf.DebugLog, "gofer", test); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 	}
@@ -1173,20 +1177,20 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *config.Config, bu
 	// Open the spec file to donate to the sandbox.
 	specFile, err := specutils.OpenSpec(bundleDir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("opening spec file: %v", err)
+		return nil, nil, nil, fmt.Errorf("opening spec file: %v", err)
 	}
 	donations.DonateAndClose("spec-fd", specFile)
 
 	// Donate any profile FDs to the gofer.
 	if err := c.donateGoferProfileFDs(conf, &donations); err != nil {
-		return nil, nil, fmt.Errorf("donating gofer profile fds: %w", err)
+		return nil, nil, nil, fmt.Errorf("donating gofer profile fds: %w", err)
 	}
 
 	// Create pipe that allows gofer to send mount list to sandbox after all paths
 	// have been resolved.
 	mountsSand, mountsGofer, err := os.Pipe()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	donations.DonateAndClose("mounts-fd", mountsGofer)
 
@@ -1202,12 +1206,21 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *config.Config, bu
 	for i := 0; i < lisafsCount; i++ {
 		fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		sandEnds = append(sandEnds, os.NewFile(uintptr(fds[0]), "sandbox IO FD"))
 
 		goferEnd := os.NewFile(uintptr(fds[1]), "gofer IO FD")
 		donations.DonateAndClose("io-fds", goferEnd)
+	}
+	var devSandEnd *os.File
+	if specutils.GPUFunctionalityRequested(spec, conf) {
+		fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		devSandEnd = os.NewFile(uintptr(fds[0]), "sandbox dev IO FD")
+		donations.DonateAndClose("dev-io-fd", os.NewFile(uintptr(fds[1]), "gofer dev IO FD"))
 	}
 
 	if attached {
@@ -1240,19 +1253,19 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *config.Config, bu
 	} else {
 		userNS, ok := specutils.GetNS(specs.UserNamespace, spec)
 		if !ok {
-			return nil, nil, fmt.Errorf("unable to run a rootless container without userns")
+			return nil, nil, nil, fmt.Errorf("unable to run a rootless container without userns")
 		}
 		nss = append(nss, userNS)
 		syncFile, err := sandbox.ConfigureCmdForRootless(cmd, &donations)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		defer syncFile.Close()
 	}
 
 	nvProxySetup, err := nvproxySetupAfterGoferUserns(spec, conf, cmd, &donations)
 	if err != nil {
-		return nil, nil, fmt.Errorf("setting up nvproxy for gofer: %w", err)
+		return nil, nil, nil, fmt.Errorf("setting up nvproxy for gofer: %w", err)
 	}
 
 	donations.Transfer(cmd, nextFD)
@@ -1261,7 +1274,7 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *config.Config, bu
 	donation.LogDonations(cmd)
 	log.Debugf("Starting gofer: %s %v", cmd.Path, cmd.Args)
 	if err := specutils.StartInNS(cmd, nss); err != nil {
-		return nil, nil, fmt.Errorf("gofer: %v", err)
+		return nil, nil, nil, fmt.Errorf("gofer: %v", err)
 	}
 	log.Infof("Gofer started, PID: %d", cmd.Process.Pid)
 	c.GoferPid = cmd.Process.Pid
@@ -1270,16 +1283,16 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *config.Config, bu
 	// Set up and synchronize rootless mode userns mappings.
 	if rootlessEUID {
 		if err := sandbox.SetUserMappings(spec, cmd.Process.Pid); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 
 	// Set up nvproxy within the Gofer namespace.
 	if err := nvProxySetup(); err != nil {
-		return nil, nil, fmt.Errorf("nvproxy setup: %w", err)
+		return nil, nil, nil, fmt.Errorf("nvproxy setup: %w", err)
 	}
 
-	return sandEnds, mountsSand, nil
+	return sandEnds, devSandEnd, mountsSand, nil
 }
 
 // changeStatus transitions from one status to another ensuring that the

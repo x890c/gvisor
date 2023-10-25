@@ -19,13 +19,17 @@ import (
 	"fmt"
 	"path"
 
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
+	"gvisor.dev/gvisor/pkg/fd"
 	"gvisor.dev/gvisor/pkg/fspath"
+	"gvisor.dev/gvisor/pkg/lisafs"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
+	"gvisor.dev/gvisor/pkg/unet"
 )
 
 // Name is the dev filesystem name.
@@ -77,10 +81,20 @@ func (fst FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virtual
 	}); err != nil {
 		return nil, nil, err
 	}
+	var goferFD lisafs.ClientFD
+	if iopts.GoferFD != nil {
+		goferFD, err = connectClient(ctx, iopts.GoferFD.FD())
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 
-	root.Mount().Filesystem().IncRef()
-	root.Dentry().IncRef()
-	return root.Mount().Filesystem(), root.Dentry(), nil
+	fs, err := newFilesystem(ctx, vfsObj, root.Mount().Filesystem(), goferFD, iopts.UniqueID)
+	if err != nil {
+		return nil, nil, err
+	}
+	root.Dentry().IncRef() // transferred to caller, as required by
+	return &fs.vfsfs, root.Dentry(), nil
 }
 
 // Release implements vfs.FilesystemType.Release.
@@ -90,6 +104,102 @@ func (fst *FilesystemType) Release(ctx context.Context) {}
 type InternalData struct {
 	// ShmMode indicates the mode to create the /dev/shm dir with.
 	ShmMode *uint16
+	// GoferFD is the FD for the dev gofer connection.
+	GoferFD *fd.FD
+	// UniqueID is an optional opaque string used to reassociate the filesystem
+	// with a new server FD during restoration from checkpoint.
+	UniqueID string
+}
+
+// filesystem is a wrapper, which provides some devfs specific functionality.
+//
+// +stateify savable
+type filesystem struct {
+	vfsfs  vfs.Filesystem
+	baseFS *vfs.Filesystem
+	// This embedding is always baseFS.Impl().
+	vfs.FilesystemImpl
+
+	goferFD  lisafs.ClientFD `state:"nosave"`
+	uniqueID string
+}
+
+func newFilesystem(ctx context.Context, vfsObj *vfs.VirtualFilesystem, baseFS *vfs.Filesystem, goferFD lisafs.ClientFD, uniqueID string) (*filesystem, error) {
+	fs := filesystem{
+		baseFS:         baseFS,
+		FilesystemImpl: baseFS.Impl(),
+		goferFD:        goferFD,
+		uniqueID:       uniqueID,
+	}
+	fs.vfsfs.Init(vfsObj, baseFS.FilesystemType(), &fs)
+	fs.baseFS.IncRef() // Held by fs, and released in fs.Release().
+	return &fs, nil
+}
+
+// Release implements vfs.FilesystemImpl.Release.
+func (fs *filesystem) Release(ctx context.Context) {
+	fs.baseFS.DecRef(ctx)
+	if fs.goferFD.Ok() {
+		// Close the connection to the server. This implicitly closes all FDs.
+		fs.goferFD.Client().Close()
+	}
+}
+
+// connectClient establishes the LISAFS connection to the dev gofer server.
+// It takes ownership of fd.
+func connectClient(ctx context.Context, fd int) (lisafs.ClientFD, error) {
+	ctx.UninterruptibleSleepStart(false)
+	defer ctx.UninterruptibleSleepFinish(false)
+
+	sock, err := unet.NewSocket(fd)
+	if err != nil {
+		ctx.Warningf("failed to create socket for dev gofer client: %v", err)
+		return lisafs.ClientFD{}, err
+	}
+	client, rootInode, rootHostFD, err := lisafs.NewClient(sock)
+	if err != nil {
+		ctx.Warningf("failed to create dev gofer client: %v", err)
+		return lisafs.ClientFD{}, err
+	}
+	if rootHostFD >= 0 {
+		_ = unix.Close(rootHostFD)
+	}
+	return client.NewFD(rootInode.ControlFD), nil
+}
+
+// OpenAt implements vfs.FilesystemImpl.OpenAt. We only intercept OpenAt so we
+// can make the device lisafs FD available to tmpfs.filesystem.OpenAt() ->
+// VirtualFilesystem.OpenDeviceSpecialFile() implementations.
+func (fs *filesystem) OpenAt(ctx context.Context, rp *vfs.ResolvingPath, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
+	if fs.goferFD.Ok() {
+		// Inject our custom context, which also provides CtxDevGoferClientFD.
+		ctx = fs.wrapContext(ctx)
+	}
+	return fs.FilesystemImpl.OpenAt(ctx, rp, opts)
+}
+
+// filesystemContext implements context.Context by extending an existing
+// context.Context with filesystem.
+type filesystemContext struct {
+	context.Context
+	fs *filesystem
+}
+
+func (fs *filesystem) wrapContext(ctx context.Context) *filesystemContext {
+	return &filesystemContext{
+		Context: ctx,
+		fs:      fs,
+	}
+}
+
+// Value implements context.Context.Value.
+func (fc *filesystemContext) Value(key any) any {
+	switch key {
+	case vfs.CtxDevGoferClientFD:
+		return fc.fs.goferFD
+	default:
+		return fc.Context.Value(key)
+	}
 }
 
 func pathOperationAt(root vfs.VirtualDentry, pathname string) *vfs.PathOperation {

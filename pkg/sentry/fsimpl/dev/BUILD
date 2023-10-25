@@ -8,16 +8,21 @@ go_library(
     name = "dev",
     srcs = [
         "dev.go",
+        "save_restore.go",
     ],
     visibility = ["//pkg/sentry:internal"],
     deps = [
         "//pkg/abi/linux",
         "//pkg/context",
         "//pkg/errors/linuxerr",
+        "//pkg/fd",
         "//pkg/fspath",
+        "//pkg/lisafs",
         "//pkg/sentry/fsimpl/tmpfs",
         "//pkg/sentry/kernel/auth",
         "//pkg/sentry/vfs",
+        "//pkg/unet",
+        "@org_golang_x_sys//unix:go_default_library",
     ],
 )
 

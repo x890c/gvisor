@@ -82,6 +82,7 @@ type goferSyncFDs struct {
 type Gofer struct {
 	bundleDir  string
 	ioFDs      intFlags
+	devIoFD    int
 	applyCaps  bool
 	setUpRoot  bool
 	mountConfs boot.GoferMountConfFlags
@@ -116,6 +117,7 @@ func (g *Gofer) SetFlags(f *flag.FlagSet) {
 
 	// Open FDs that are donated to the gofer.
 	f.Var(&g.ioFDs, "io-fds", "list of FDs to connect gofer servers. They must follow this order: root first, then mounts as defined in the spec")
+	f.IntVar(&g.devIoFD, "dev-io-fd", -1, "optional FD to connect /dev gofer server")
 	f.Var(&g.mountConfs, "gofer-mount-confs", "information about how the gofer mounts have been configured")
 	f.IntVar(&g.specFD, "spec-fd", -1, "required fd with the container spec")
 	f.IntVar(&g.mountsFD, "mounts-fd", -1, "mountsFD is the file descriptor to write list of mounts after they have been resolved (direct paths, no symlinks).")
@@ -308,6 +310,15 @@ func (g *Gofer) serve(spec *specs.Spec, conf *config.Config, root string) subcom
 		util.Fatalf("too many FDs passed for mounts. mounts: %d, FDs: %d", len(cfgs), len(g.ioFDs))
 	}
 
+	if g.devIoFD >= 0 {
+		cfgs = append(cfgs, connectionConfig{
+			sock:      newSocket(g.devIoFD),
+			mountPath: "/dev",
+			readonly:  true,
+		})
+		log.Infof("Serving /dev mapped on FD %d (ro: true)", g.devIoFD)
+	}
+
 	for _, cfg := range cfgs {
 		conn, err := server.CreateConnection(cfg.sock, cfg.mountPath, cfg.readonly)
 		if err != nil {
@@ -410,6 +421,11 @@ func (g *Gofer) setupRootFS(spec *specs.Spec, conf *config.Config) error {
 		util.Fatalf("error setting up FS: %v", err)
 	}
 
+	// Set up /dev directory is needed.
+	if g.devIoFD >= 0 {
+		g.setupDev(root)
+	}
+
 	// Create working directory if needed.
 	if spec.Process.Cwd != "" {
 		dst, err := resolveSymlinks(root, spec.Process.Cwd)
@@ -486,6 +502,13 @@ func (g *Gofer) setupMounts(conf *config.Config, mounts []specs.Mount, root, pro
 				return fmt.Errorf("mount dst: %q, flags: %#x, err: %v", dst, flags, err)
 			}
 		}
+	}
+	return nil
+}
+
+func (g *Gofer) setupDev(root string) error {
+	if err := os.MkdirAll(filepath.Join(root, "dev"), 0777); err != nil {
+		return fmt.Errorf("creating dev directory: %v", err)
 	}
 	return nil
 }

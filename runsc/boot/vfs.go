@@ -354,6 +354,9 @@ type containerMounter struct {
 	// goferFDs is the list of FDs to be dispensed for gofer mounts.
 	goferFDs fdDispenser
 
+	// devGoferFD is the FD for the dev gofer connection.
+	devGoferFD *fd.FD
+
 	// goferFilestoreFDs are FDs to the regular files that will back the tmpfs or
 	// overlayfs mount for certain gofer mounts.
 	goferFilestoreFDs fdDispenser
@@ -385,6 +388,7 @@ func newContainerMounter(info *containerInfo, k *kernel.Kernel, hints *PodMountH
 		root:              info.spec.Root,
 		mounts:            compileMounts(info.spec, info.conf),
 		goferFDs:          fdDispenser{fds: info.goferFDs},
+		devGoferFD:        info.devGoferFD,
 		goferFilestoreFDs: fdDispenser{fds: info.goferFilestoreFDs},
 		goferMountConfs:   info.goferMountConfs,
 		k:                 k,
@@ -401,6 +405,11 @@ func (c *containerMounter) checkDispenser() error {
 	}
 	if !c.goferFilestoreFDs.empty() {
 		return fmt.Errorf("not all gofer Filestore FDs were consumed, remaining: %v", c.goferFilestoreFDs)
+	}
+	if c.devGoferFD != nil {
+		if fd := c.devGoferFD.FD(); fd >= 0 {
+			return fmt.Errorf("/dev gofer FD was not consumed, got: %d", fd)
+		}
 	}
 	return nil
 }
@@ -696,6 +705,7 @@ func (c *containerMounter) mountSubmounts(ctx context.Context, spec *specs.Spec,
 type mountInfo struct {
 	mount          *specs.Mount
 	goferFD        *fd.FD
+	devGoferFD     *fd.FD
 	hint           *MountHint
 	goferMountConf GoferMountConf
 	filestoreFD    *fd.FD
@@ -725,6 +735,10 @@ func (c *containerMounter) prepareMounts() ([]mountInfo, error) {
 				specutils.ChangeMountType(info.mount, tmpfs.Name)
 			}
 			goferMntIdx++
+		}
+		if info.mount.Destination == "/dev" && c.devGoferFD != nil {
+			info.devGoferFD = c.devGoferFD
+			c.devGoferFD = nil
 		}
 		mounts = append(mounts, info)
 	}
@@ -791,8 +805,16 @@ func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo,
 
 	// Find filesystem name and FS specific data field.
 	switch m.mount.Type {
-	case devpts.Name, dev.Name, proc.Name:
+	case devpts.Name, proc.Name:
 		// Nothing to do.
+
+	case dev.Name:
+		if m.devGoferFD != nil {
+			internalData = dev.InternalData{
+				GoferFD:  m.devGoferFD,
+				UniqueID: m.mount.Destination,
+			}
+		}
 
 	case Nonefs:
 		fsName = sys.Name
@@ -1060,6 +1082,12 @@ func (c *containerMounter) configureRestore(ctx context.Context) (context.Contex
 		if submount.goferFD != nil {
 			fdmap[submount.mount.Destination] = submount.goferFD.Release()
 		}
+	}
+	if c.devGoferFD != nil {
+		if _, ok := fdmap["/dev"]; ok {
+			panic("/dev exists as a bind mount")
+		}
+		fdmap["/dev"] = c.devGoferFD.Release()
 	}
 	return context.WithValue(ctx, vfs.CtxRestoreFilesystemFDMap, fdmap), nil
 }
