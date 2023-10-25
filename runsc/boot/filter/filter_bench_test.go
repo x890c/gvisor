@@ -37,7 +37,7 @@ type Options struct {
 // BenchmarkSentrySystrap benchmarks the seccomp filters used by the Sentry
 // using the Systrap platform.
 func BenchmarkSentrySystrap(b *testing.B) {
-	rules, denyRules := filter.Rules(filter.Options{
+	rules, denyRules, opts := filter.Rules(filter.Options{
 		Platform: &systrap.Systrap{},
 	})
 	secbench.Run(b, secbench.BenchFromSyscallRules(
@@ -63,13 +63,14 @@ func BenchmarkSentrySystrap(b *testing.B) {
 		},
 		rules,
 		denyRules,
+		opts,
 	))
 }
 
 // BenchmarkSentryKVM benchmarks the seccomp filters used by the Sentry
 // using the KVM platform.
 func BenchmarkSentryKVM(b *testing.B) {
-	rules, denyRules := filter.Rules(filter.Options{
+	rules, denyRules, opts := filter.Rules(filter.Options{
 		Platform: &kvm.KVM{},
 	})
 	secbench.Run(b, secbench.BenchFromSyscallRules(
@@ -93,11 +94,12 @@ func BenchmarkSentryKVM(b *testing.B) {
 		},
 		rules,
 		denyRules,
+		opts,
 	))
 }
 
 func BenchmarkNVProxyIoctl(b *testing.B) {
-	rules, denyRules := filter.Rules(filter.Options{
+	rules, denyRules, opts := filter.Rules(filter.Options{
 		Platform: &systrap.Systrap{},
 		NVProxy:  true,
 	})
@@ -123,5 +125,6 @@ func BenchmarkNVProxyIoctl(b *testing.B) {
 		},
 		rules,
 		denyRules,
+		opts,
 	))
 }

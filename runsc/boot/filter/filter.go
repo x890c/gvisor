@@ -18,6 +18,7 @@
 package filter
 
 import (
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/seccomp"
 	"gvisor.dev/gvisor/pkg/sentry/devices/accel"
@@ -37,8 +38,9 @@ type Options struct {
 	ControllerFD          int
 }
 
-// Rules returns the seccomp (rules, denyRules) to use for the Sentry.
-func Rules(opt Options) (seccomp.SyscallRules, seccomp.SyscallRules) {
+// Rules returns the seccomp (rules, denyRules, program options) to use for
+// the Sentry.
+func Rules(opt Options) (seccomp.SyscallRules, seccomp.SyscallRules, seccomp.ProgramOptions) {
 	s := allowedSyscalls
 	s.Merge(controlServerFilters(opt.ControllerFD))
 
@@ -73,13 +75,41 @@ func Rules(opt Options) (seccomp.SyscallRules, seccomp.SyscallRules) {
 
 	s.Merge(opt.Platform.SyscallFilters())
 
-	return s, seccomp.DenyNewExecMappings
+	opts := seccomp.DefaultProgramOptions()
+	opts.HotSyscalls = hotSyscalls(opt)
+
+	return s, seccomp.DenyNewExecMappings, opts
+}
+
+// hotSyscalls returns the full set of hot syscall numbers.
+func hotSyscalls(opt Options) []uintptr {
+	// futex(2) is unequivocally the most-frequently-used syscall by the
+	// Sentry across all platforms.
+	hotSyscalls := []uintptr{unix.SYS_FUTEX}
+	// ... Then comes the platform-specific hot syscalls which are typically
+	// part of the syscall interception hot path.
+	hotSyscalls = append(hotSyscalls, opt.Platform.HottestSyscalls()...)
+	// ... Then come a few syscalls that are frequent just from workloads in
+	// general.
+	hotSyscalls = append(hotSyscalls, archSpecificHotSyscalls()...)
+
+	// Now deduplicate them.
+	sysnoMap := make(map[uintptr]struct{}, len(hotSyscalls))
+	uniqueHotSyscalls := make([]uintptr, 0, len(hotSyscalls))
+	for _, sysno := range hotSyscalls {
+		if _, alreadyAdded := sysnoMap[sysno]; !alreadyAdded {
+			sysnoMap[sysno] = struct{}{}
+			uniqueHotSyscalls = append(uniqueHotSyscalls, sysno)
+		}
+	}
+
+	return uniqueHotSyscalls
 }
 
 // Install seccomp filters based on the given platform.
 func Install(opt Options) error {
-	rules, denyRules := Rules(opt)
-	return seccomp.Install(rules, denyRules)
+	rules, denyRules, seccompOpts := Rules(opt)
+	return seccomp.Install(rules, denyRules, seccompOpts)
 }
 
 // Report writes a warning message to the log.

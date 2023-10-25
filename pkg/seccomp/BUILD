@@ -11,6 +11,7 @@ go_library(
         "seccomp.go",
         "seccomp_amd64.go",
         "seccomp_arm64.go",
+        "seccomp_fuzz_helpers.go",
         "seccomp_optimizer.go",
         "seccomp_rules.go",
         "seccomp_unsafe.go",
@@ -37,5 +38,6 @@ go_test(
     deps = [
         "//pkg/abi/linux",
         "//pkg/bpf",
+        "@org_golang_x_sys//unix:go_default_library",
     ],
 )

@@ -36,7 +36,7 @@ var (
 
 func main() {
 	flag.Parse()
-	rules, denyRules := filter.Rules(filter.Options{
+	rules, denyRules, opts := filter.Rules(filter.Options{
 		Platform: &systrap.Systrap{},
 		NVProxy:  *nvproxy,
 	})
@@ -49,7 +49,7 @@ func main() {
 			Rules:  rules,
 			Action: linux.SECCOMP_RET_ALLOW,
 		},
-	}, linux.SECCOMP_RET_ERRNO, linux.SECCOMP_RET_ERRNO)
+	}, opts)
 	if err != nil {
 		log.Warningf("%v", err)
 		os.Exit(1)
@@ -57,8 +57,9 @@ func main() {
 	log.Infof("Size before optimizations: %d", stats.SizeBeforeOptimizations)
 	log.Infof("Size after optimizations: %d", stats.SizeAfterOptimizations)
 	log.Infof("Build duration: %v", stats.BuildDuration)
-	log.Infof("Optimization passes duration: %v", stats.OptimizeDuration)
-	log.Infof("Total duration: %v", stats.BuildDuration+stats.OptimizeDuration)
+	log.Infof("Rule optimization passes duration: %v", stats.RuleOptimizeDuration)
+	log.Infof("BPF optimization passes duration: %v", stats.BPFOptimizeDuration)
+	log.Infof("Total duration: %v", stats.BuildDuration+stats.RuleOptimizeDuration+stats.BPFOptimizeDuration)
 	switch *output {
 	case "fancy":
 		dump, err := bpf.DecodeInstructions(insns)

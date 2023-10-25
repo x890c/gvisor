@@ -59,7 +59,7 @@ func TestIoctlFirstArgumentIsNonNegativeFD(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			rules, _ := Rules(options)
+			rules, _, _ := Rules(options)
 			if err := rules.ForSingleArgument(unix.SYS_IOCTL, 0, func(v seccomp.ValueMatcher) error {
 				if v == nil {
 					return fmt.Errorf("nil first argument")

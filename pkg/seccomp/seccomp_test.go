@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/bpf"
 )
@@ -70,12 +71,11 @@ func TestBasic(t *testing.T) {
 	}
 
 	for _, test := range []struct {
-		name          string
-		ruleSets      []RuleSet
-		wantPanic     bool
-		defaultAction linux.BPFAction
-		badArchAction linux.BPFAction
-		specs         []spec
+		name      string
+		ruleSets  []RuleSet
+		wantPanic bool
+		options   ProgramOptions
+		specs     []spec
 	}{
 		{
 			name: "Single syscall",
@@ -85,8 +85,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "syscall allowed",
@@ -119,8 +121,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_TRAP,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_KILL_THREAD,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_KILL_THREAD,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "allowed (1a)",
@@ -156,8 +160,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "allowed (1)",
@@ -211,8 +217,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "arch (123)",
@@ -231,8 +239,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "action trap",
@@ -254,8 +264,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "allowed",
@@ -286,8 +298,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "match first rule",
@@ -335,8 +349,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "hit first rule",
@@ -381,8 +397,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "argument allowed (all match)",
@@ -427,8 +445,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "arg allowed",
@@ -475,8 +495,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "high 32bits greater",
@@ -518,8 +540,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "arg allowed",
@@ -564,8 +588,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "high 32bits greater",
@@ -607,8 +633,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "arg allowed (both greater)",
@@ -658,8 +686,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "high 32bits greater",
@@ -701,8 +731,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "arg allowed",
@@ -752,8 +784,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "high 32bits greater",
@@ -796,8 +830,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "arg allowed",
@@ -846,8 +882,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "arg allowed (low order mandatory bit)",
@@ -913,8 +951,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "zero allowed",
@@ -975,8 +1015,10 @@ func TestBasic(t *testing.T) {
 					Action: linux.SECCOMP_RET_ALLOW,
 				},
 			},
-			defaultAction: linux.SECCOMP_RET_TRAP,
-			badArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			options: ProgramOptions{
+				DefaultAction: linux.SECCOMP_RET_TRAP,
+				BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+			},
 			specs: []spec{
 				{
 					desc: "allowed",
@@ -1001,7 +1043,7 @@ func TestBasic(t *testing.T) {
 					t.Helper()
 				}()
 				var err error
-				instrs, _, err = BuildProgram(test.ruleSets, test.defaultAction, test.badArchAction)
+				instrs, _, err = BuildProgram(test.ruleSets, test.options)
 				if err != nil {
 					t.Fatalf("BuildProgram() got error: %v", err)
 				}
@@ -1052,7 +1094,10 @@ func TestRandom(t *testing.T) {
 			Rules:  syscallRules,
 			Action: linux.SECCOMP_RET_ALLOW,
 		},
-	}, linux.SECCOMP_RET_TRAP, linux.SECCOMP_RET_KILL_THREAD)
+	}, ProgramOptions{
+		DefaultAction: linux.SECCOMP_RET_TRAP,
+		BadArchAction: linux.SECCOMP_RET_KILL_THREAD,
+	})
 	if err != nil {
 		t.Fatalf("buildProgram() got error: %v", err)
 	}
@@ -1177,6 +1222,36 @@ func TestMerge(t *testing.T) {
 
 // TestOptimizeSyscallRule tests the behavior of syscall rule optimizers.
 func TestOptimizeSyscallRule(t *testing.T) {
+	// av is a shorthand for `AnyValue{}`, used below to keep `PerArg`
+	// structs short enough to comfortably fit on one line.
+	av := AnyValue{}
+
+	// Some useful constants that are larger than uint32.
+	const (
+		a1 = 0xA1A1A1A1A1A1A1A1
+		a2 = 0xA2A2A2A2A2A2A2A2
+		b1 = 0xB1B1B1B1B1B1B1B1
+		b2 = 0xB2B2B2B2B2B2B2B2
+		b3 = 0xB3B3B3B3B3B3B3B3
+		c1 = 0xC1C1C1C1C1C1C1C1
+		c2 = 0xC2C2C2C2C2C2C2C2
+		c3 = 0xC3C3C3C3C3C3C3C3
+		d0 = 0xD0D0D0D0D0D0D0D0
+	)
+
+	// split replaces a `splittableValueMatcher` rule with its `splitMatcher`
+	// version.
+	s := func(matcher splittableValueMatcher) ValueMatcher {
+		return matcher.split()
+	}
+
+	highEq := func(val uintptr) splitMatcher {
+		return high32BitsMatch(halfEqualTo(val))
+	}
+	lowEq := func(val uintptr) splitMatcher {
+		return low32BitsMatch(halfEqualTo(val))
+	}
+
 	for _, test := range []struct {
 		name       string
 		rule       SyscallRule
@@ -1185,32 +1260,32 @@ func TestOptimizeSyscallRule(t *testing.T) {
 	}{
 		{
 			name: "do nothing to a simple rule",
-			rule: PerArg{NotEqual(0xff)},
-			want: PerArg{NotEqual(0xff)},
+			rule: PerArg{NotEqual(0xff), av, av, av, av, av, av},
+			want: PerArg{NotEqual(0xff), av, av, av, av, av, av},
 		},
 		{
 			name: "flatten Or rule",
 			rule: Or{
 				Or{
-					PerArg{EqualTo(0x11)},
+					PerArg{EqualTo(a1)},
 					Or{
-						PerArg{EqualTo(0x22)},
-						PerArg{EqualTo(0x33)},
+						PerArg{EqualTo(b1)},
+						PerArg{EqualTo(b2)},
 					},
-					PerArg{EqualTo(0x44)},
+					PerArg{EqualTo(d0)},
 				},
 				Or{
-					PerArg{EqualTo(0x55)},
-					PerArg{EqualTo(0x66)},
+					PerArg{EqualTo(c1)},
+					PerArg{EqualTo(c2)},
 				},
 			},
 			want: Or{
-				PerArg{EqualTo(0x11)},
-				PerArg{EqualTo(0x22)},
-				PerArg{EqualTo(0x33)},
-				PerArg{EqualTo(0x44)},
-				PerArg{EqualTo(0x55)},
-				PerArg{EqualTo(0x66)},
+				PerArg{s(EqualTo(a1)), av, av, av, av, av, av},
+				PerArg{s(EqualTo(b1)), av, av, av, av, av, av},
+				PerArg{s(EqualTo(b2)), av, av, av, av, av, av},
+				PerArg{s(EqualTo(d0)), av, av, av, av, av, av},
+				PerArg{s(EqualTo(c1)), av, av, av, av, av, av},
+				PerArg{s(EqualTo(c2)), av, av, av, av, av, av},
 			},
 		},
 		{
@@ -1230,36 +1305,36 @@ func TestOptimizeSyscallRule(t *testing.T) {
 				},
 			},
 			want: And{
-				PerArg{NotEqual(0x11)},
-				PerArg{NotEqual(0x22)},
-				PerArg{NotEqual(0x33)},
-				PerArg{NotEqual(0x44)},
-				PerArg{NotEqual(0x55)},
-				PerArg{NotEqual(0x66)},
+				PerArg{NotEqual(0x11), av, av, av, av, av, av},
+				PerArg{NotEqual(0x22), av, av, av, av, av, av},
+				PerArg{NotEqual(0x33), av, av, av, av, av, av},
+				PerArg{NotEqual(0x44), av, av, av, av, av, av},
+				PerArg{NotEqual(0x55), av, av, av, av, av, av},
+				PerArg{NotEqual(0x66), av, av, av, av, av, av},
 			},
 		},
 		{
 			name: "simplify Or with single rule",
 			rule: Or{
-				PerArg{EqualTo(0x11)},
+				PerArg{NotEqual(a1)},
 			},
-			want: PerArg{EqualTo(0x11)},
+			want: PerArg{NotEqual(a1), av, av, av, av, av, av},
 		},
 		{
 			name: "simplify And with single rule",
 			rule: And{
-				PerArg{EqualTo(0x11)},
+				PerArg{NotEqual(a1)},
 			},
-			want: PerArg{EqualTo(0x11)},
+			want: PerArg{NotEqual(a1), av, av, av, av, av, av},
 		},
 		{
 			name: "simplify Or with MatchAll",
 			rule: Or{
-				PerArg{EqualTo(0x11)},
+				PerArg{NotEqual(a1)},
 				Or{
 					MatchAll{},
 				},
-				PerArg{EqualTo(0x22)},
+				PerArg{NotEqual(a2)},
 			},
 			want: MatchAll{},
 		},
@@ -1277,15 +1352,15 @@ func TestOptimizeSyscallRule(t *testing.T) {
 		{
 			name: "simplify And with MatchAll",
 			rule: And{
-				PerArg{NotEqual(0x11)},
+				PerArg{NotEqual(a1)},
 				And{
 					MatchAll{},
 				},
-				PerArg{NotEqual(0x22)},
+				PerArg{NotEqual(a2)},
 			},
 			want: And{
-				PerArg{NotEqual(0x11)},
-				PerArg{NotEqual(0x22)},
+				PerArg{NotEqual(a1), av, av, av, av, av, av},
+				PerArg{NotEqual(a2), av, av, av, av, av, av},
 			},
 		},
 		{
@@ -1299,6 +1374,136 @@ func TestOptimizeSyscallRule(t *testing.T) {
 			},
 			want: MatchAll{},
 		},
+		{
+			name: "PerArg nil to AnyValue",
+			rule: PerArg{av, EqualTo(0)},
+			optimizers: []ruleOptimizerFunc{
+				nilInPerArgToAnyValue,
+			},
+			want: PerArg{av, EqualTo(0), av, av, av, av, av},
+		},
+		{
+			name: "Useless PerArg is MatchAll",
+			rule: PerArg{av, av},
+			optimizers: []ruleOptimizerFunc{
+				nilInPerArgToAnyValue,
+				convertUselessPerArgToMatchAll,
+			},
+			want: MatchAll{},
+		},
+		{
+			name: "halfValueMatchers are simplified",
+			rule: PerArg{
+				EqualTo(0),
+				splitMatcher{
+					highMatcher: halfNotSet(0),
+					lowMatcher: halfMaskedEqual{
+						mask:  0,
+						value: 0x89abcdef,
+					},
+				},
+				splitMatcher{
+					highMatcher: halfNotSet(1 << 4),
+					lowMatcher: halfMaskedEqual{
+						mask:  0xffffffff,
+						value: 0x89abcdef,
+					},
+				},
+				splitMatcher{
+					highMatcher: halfNotSet(0),
+					lowMatcher: halfMaskedEqual{
+						mask:  0xffffffff,
+						value: 0x89abcdef,
+					},
+				},
+				splitMatcher{
+					highMatcher: halfNotSet(0),
+					lowMatcher: halfMaskedEqual{
+						mask:  0,
+						value: 0,
+					},
+				},
+				splitMatcher{
+					highMatcher: halfAnyValue{},
+					lowMatcher: halfMaskedEqual{
+						mask:  0x89abcdef,
+						value: 0x89abcdef,
+					},
+				},
+			},
+			want: PerArg{
+				s(EqualTo(0)),
+				splitMatcher{
+					highMatcher: halfAnyValue{},
+					lowMatcher: halfMaskedEqual{
+						mask:  0,
+						value: 0x89abcdef,
+					},
+				},
+				splitMatcher{
+					highMatcher: halfNotSet(1 << 4),
+					lowMatcher:  halfEqualTo(0x89abcdef),
+				},
+				splitMatcher{
+					highMatcher: halfAnyValue{},
+					lowMatcher:  halfEqualTo(0x89abcdef),
+				},
+				av, // Both halves are simplified to `halfAnyValue`.
+				splitMatcher{
+					highMatcher: halfAnyValue{},
+					lowMatcher: halfMaskedEqual{
+						mask:  0x89abcdef,
+						value: 0x89abcdef,
+					},
+				},
+				av,
+			},
+		},
+		{
+			name: "Common value matchers in PerArg are extracted",
+			rule: Or{
+				PerArg{EqualTo(a1), EqualTo(b1), EqualTo(c1), EqualTo(d0)},
+				PerArg{EqualTo(a2), EqualTo(b1), EqualTo(c1), EqualTo(d0)},
+				PerArg{EqualTo(a1), EqualTo(b2), EqualTo(c2), EqualTo(d0)},
+				PerArg{EqualTo(a2), EqualTo(b2), EqualTo(c2), EqualTo(d0)},
+				PerArg{EqualTo(a1), EqualTo(b3), EqualTo(c3), EqualTo(d0)},
+				PerArg{EqualTo(a2), EqualTo(b3), EqualTo(c3), EqualTo(d0)},
+			},
+			want: And{
+				Or{
+					PerArg{s(EqualTo(a1)), av, av, av, av, av, av},
+					PerArg{s(EqualTo(a2)), av, av, av, av, av, av},
+				},
+				PerArg{av, av, av, s(EqualTo(d0)), av, av, av},
+				Or{
+					PerArg{av, s(EqualTo(b1)), s(EqualTo(c1)), av, av, av, av},
+					PerArg{av, s(EqualTo(b2)), s(EqualTo(c2)), av, av, av, av},
+					PerArg{av, s(EqualTo(b3)), s(EqualTo(c3)), av, av, av, av},
+				},
+			},
+		},
+		{
+			name: "Common halfValueMatchers in splitMatchers are extracted",
+			rule: Or{
+				PerArg{EqualTo(0xA1), EqualTo(0xB1), EqualTo(c1), EqualTo(d0)},
+				PerArg{EqualTo(0xA1), EqualTo(0xB1), EqualTo(c2), EqualTo(d0)},
+				PerArg{EqualTo(0xA2), EqualTo(0xB2), EqualTo(c1), EqualTo(d0)},
+				PerArg{EqualTo(0xA2), EqualTo(0xB2), EqualTo(c2), EqualTo(d0)},
+			},
+			want: And{
+				PerArg{highEq(0), av, av, av, av, av, av},
+				PerArg{av, highEq(0), av, av, av, av, av},
+				Or{
+					PerArg{av, av, s(EqualTo(c1)), av, av, av, av},
+					PerArg{av, av, s(EqualTo(c2)), av, av, av, av},
+				},
+				PerArg{av, av, av, s(EqualTo(d0)), av, av, av},
+				Or{
+					PerArg{lowEq(0xA1), lowEq(0xB1), av, av, av, av, av},
+					PerArg{lowEq(0xA2), lowEq(0xB2), av, av, av, av, av},
+				},
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var got SyscallRule
@@ -1309,6 +1514,582 @@ func TestOptimizeSyscallRule(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, test.want) {
 				t.Errorf("got rule:\n%v\nwant rule:\n%v\n", got, test.want)
+			}
+		})
+	}
+}
+
+func TestOrderRuleSets(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		ruleSets []RuleSet
+		options  ProgramOptions
+		want     orderedRuleSets
+		wantErr  bool
+	}{
+		{
+			name:    "no RuleSets",
+			options: DefaultProgramOptions(),
+			want:    orderedRuleSets{},
+		},
+		{
+			name:    "inconsistent vsyscall",
+			options: DefaultProgramOptions(),
+			ruleSets: []RuleSet{
+				{
+					Rules:    NewSyscallRules().Add(unix.SYS_READ, MatchAll{}),
+					Action:   linux.SECCOMP_RET_TRACE,
+					Vsyscall: false,
+				},
+				{
+					Rules:    NewSyscallRules().Add(unix.SYS_READ, MatchAll{}),
+					Action:   linux.SECCOMP_RET_TRACE,
+					Vsyscall: true,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "single trivial rule",
+			ruleSets: []RuleSet{
+				{
+					Rules:    NewSyscallRules().Add(unix.SYS_READ, MatchAll{}),
+					Action:   linux.SECCOMP_RET_TRACE,
+					Vsyscall: false,
+				},
+			},
+			options: DefaultProgramOptions(),
+			want: orderedRuleSets{
+				trivial: map[uintptr]singleSyscallRuleSet{
+					unix.SYS_READ: {
+						sysno: unix.SYS_READ,
+						rules: []syscallRuleAction{
+							{
+								rule:   MatchAll{},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: false,
+					},
+				},
+			},
+		},
+		{
+			name: "hot single trivial rule still ends up as trivial",
+			ruleSets: []RuleSet{
+				{
+					Rules:    NewSyscallRules().Add(unix.SYS_READ, MatchAll{}),
+					Action:   linux.SECCOMP_RET_TRACE,
+					Vsyscall: false,
+				},
+			},
+			options: ProgramOptions{
+				HotSyscalls: []uintptr{unix.SYS_READ},
+			},
+			want: orderedRuleSets{
+				trivial: map[uintptr]singleSyscallRuleSet{
+					unix.SYS_READ: {
+						sysno: unix.SYS_READ,
+						rules: []syscallRuleAction{
+							{
+								rule:   MatchAll{},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: false,
+					},
+				},
+			},
+		},
+		{
+			name: "hot single non-trivial rule",
+			ruleSets: []RuleSet{
+				{
+					Rules: NewSyscallRules().Add(
+						unix.SYS_READ, PerArg{EqualTo(0)},
+					),
+					Action:   linux.SECCOMP_RET_TRACE,
+					Vsyscall: false,
+				},
+			},
+			options: ProgramOptions{
+				HotSyscalls: []uintptr{unix.SYS_READ},
+			},
+			want: orderedRuleSets{
+				hotNonTrivial: map[uintptr]singleSyscallRuleSet{
+					unix.SYS_READ: {
+						sysno: unix.SYS_READ,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(0)},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: false,
+					},
+				},
+				hotNonTrivialOrder: []uintptr{unix.SYS_READ},
+			},
+		},
+		{
+			name: "hot rule ordering",
+			ruleSets: []RuleSet{
+				{
+					Rules: NewSyscallRules().Add(
+						unix.SYS_FLOCK, PerArg{EqualTo(0)},
+					),
+					Action:   linux.SECCOMP_RET_TRACE,
+					Vsyscall: false,
+				},
+				{
+					Rules: NewSyscallRules().Add(
+						unix.SYS_WRITE, PerArg{EqualTo(1)},
+					).Add(
+						unix.SYS_READ, PerArg{EqualTo(2)},
+					),
+					Action:   linux.SECCOMP_RET_TRACE,
+					Vsyscall: false,
+				},
+			},
+			options: ProgramOptions{
+				HotSyscalls: []uintptr{
+					unix.SYS_READ,
+					unix.SYS_WRITE,
+					unix.SYS_FLOCK,
+				},
+			},
+			want: orderedRuleSets{
+				hotNonTrivial: map[uintptr]singleSyscallRuleSet{
+					unix.SYS_READ: {
+						sysno: unix.SYS_READ,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(2)},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: false,
+					},
+					unix.SYS_WRITE: {
+						sysno: unix.SYS_WRITE,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(1)},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: false,
+					},
+					unix.SYS_FLOCK: {
+						sysno: unix.SYS_FLOCK,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(0)},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: false,
+					},
+				},
+				hotNonTrivialOrder: []uintptr{
+					unix.SYS_READ,
+					unix.SYS_WRITE,
+					unix.SYS_FLOCK,
+				},
+			},
+		},
+		{
+			name: "cold single non-trivial non-vsyscall rule",
+			ruleSets: []RuleSet{
+				{
+					Rules: NewSyscallRules().Add(
+						unix.SYS_READ, PerArg{EqualTo(0)},
+					),
+					Action:   linux.SECCOMP_RET_TRACE,
+					Vsyscall: false,
+				},
+			},
+			options: ProgramOptions{
+				HotSyscalls: []uintptr{unix.SYS_WRITE},
+			},
+			want: orderedRuleSets{
+				coldNonTrivial: map[uintptr]singleSyscallRuleSet{
+					unix.SYS_READ: {
+						sysno: unix.SYS_READ,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(0)},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: false,
+					},
+				},
+				hotNonTrivialOrder: nil, // Empty
+			},
+		},
+		{
+			name: "cold single non-trivial yes-vsyscall rule",
+			ruleSets: []RuleSet{
+				{
+					Rules: NewSyscallRules().Add(
+						unix.SYS_READ, PerArg{EqualTo(0)},
+					),
+					Action:   linux.SECCOMP_RET_TRACE,
+					Vsyscall: true,
+				},
+			},
+			options: ProgramOptions{
+				HotSyscalls: []uintptr{unix.SYS_WRITE},
+			},
+			want: orderedRuleSets{
+				coldNonTrivial: map[uintptr]singleSyscallRuleSet{
+					unix.SYS_READ: {
+						sysno: unix.SYS_READ,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(0)},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: true,
+					},
+				},
+				hotNonTrivialOrder: nil, // Empty
+			},
+		},
+		{
+			name: "all rule types at once",
+			ruleSets: []RuleSet{
+				{
+					Rules: NewSyscallRules().Add(
+						// Hot, non-vsyscall, trivial
+						unix.SYS_READ, MatchAll{},
+					).Add(
+						// Hot, non-vsyscall, non-trivial
+						unix.SYS_WRITE, PerArg{EqualTo(4)},
+					).Add(
+						// Hot, non-vsyscall, non-trivial
+						unix.SYS_FLOCK, PerArg{EqualTo(131)},
+					),
+					Action:   linux.SECCOMP_RET_TRACE,
+					Vsyscall: false,
+				},
+				{
+					Rules: NewSyscallRules().Add(
+						// Hot, vsyscall, trivial (after optimizations)
+						unix.SYS_FUTEX, PerArg{AnyValue{}},
+					).Add(
+						// Hot, vsyscall, non-trivial
+						unix.SYS_GETPID, PerArg{EqualTo(20)},
+					).Add(
+						// Cold, vsyscall, trivial (after optimizations)
+						unix.SYS_GETTIMEOFDAY, PerArg{AnyValue{}},
+					).Add(
+						// Cold, vsyscall, non-trivial
+						unix.SYS_MINCORE, PerArg{EqualTo(78)},
+					),
+					Action:   linux.SECCOMP_RET_ERRNO,
+					Vsyscall: true,
+				},
+				{
+					Rules: NewSyscallRules().Add(
+						// Hot, non-vsyscall, trivial (after optimizations)
+						unix.SYS_CLOSE, PerArg{AnyValue{}},
+					).Add(
+						// Hot, non-vsyscall, non-trivial
+						unix.SYS_OPENAT, PerArg{EqualTo(463)},
+					).Add(
+						// Cold, non-vsyscall, non-trivial
+						unix.SYS_LINKAT, PerArg{EqualTo(471)},
+					).Add(
+						// Cold, non-vsyscall, trivial here but
+						// a later RuleSet will make it non-trivial
+						// overall.
+						unix.SYS_UNLINKAT, MatchAll{},
+					).Add(
+						// Cold, non-vsyscall, trivial and another
+						// later RuleSet will keep it trivial later.
+						unix.SYS_CHDIR, MatchAll{},
+					),
+					Action:   linux.SECCOMP_RET_KILL_THREAD,
+					Vsyscall: false,
+				},
+				{
+					Rules: NewSyscallRules().Add(
+						// Hot, non-vsyscall, non-trivial
+						unix.SYS_OPENAT, PerArg{EqualTo(463463)},
+					).Add(
+						// Cold, non-vsyscall, non-trivial
+						unix.SYS_LINKAT, PerArg{EqualTo(471471)},
+					).Add(
+						// Cold, non-vsyscall, no longer trivial.
+						unix.SYS_UNLINKAT, PerArg{EqualTo(472)},
+					).Add(
+						// Cold, non-vsyscall, remains trivial.
+						unix.SYS_FCHDIR, PerArg{AnyValue{}},
+					),
+					Action:   linux.SECCOMP_RET_KILL_PROCESS,
+					Vsyscall: false,
+				},
+				{
+					Rules: NewSyscallRules().Add(
+						// Cold, non-vsyscall, adds to previous rule
+						// after optimizations because it has the
+						// same action.
+						unix.SYS_UNLINKAT, PerArg{EqualTo(472472)},
+					),
+					Action:   linux.SECCOMP_RET_KILL_PROCESS,
+					Vsyscall: false,
+				},
+				{
+					Rules: NewSyscallRules().Add(
+						// Cold, non-vsyscall, does not add to
+						// previous rule because it has a different
+						// action.
+						unix.SYS_UNLINKAT, PerArg{EqualTo(472472472)},
+					),
+					Action:   linux.SECCOMP_RET_TRAP,
+					Vsyscall: false,
+				},
+			},
+			options: ProgramOptions{
+				HotSyscalls: []uintptr{
+					unix.SYS_READ,
+					unix.SYS_WRITE,
+					unix.SYS_FLOCK,
+					unix.SYS_CLOSE,
+					unix.SYS_OPENAT,
+					unix.SYS_GETPID,
+					// Note: not used in any RuleSet, so it should not
+					// appear in `want`:
+					unix.SYS_GETTID,
+				},
+			},
+			want: orderedRuleSets{
+				hotNonTrivial: map[uintptr]singleSyscallRuleSet{
+					unix.SYS_WRITE: {
+						sysno: unix.SYS_WRITE,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(4)},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: false,
+					},
+					unix.SYS_FLOCK: {
+						sysno: unix.SYS_FLOCK,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(131)},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: false,
+					},
+					unix.SYS_GETPID: {
+						sysno: unix.SYS_GETPID,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(20)},
+								action: linux.SECCOMP_RET_ERRNO,
+							},
+						},
+						vsyscall: true,
+					},
+					unix.SYS_OPENAT: {
+						sysno: unix.SYS_OPENAT,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(463)},
+								action: linux.SECCOMP_RET_KILL_THREAD,
+							},
+							{
+								rule:   PerArg{EqualTo(463463)},
+								action: linux.SECCOMP_RET_KILL_PROCESS,
+							},
+						},
+						vsyscall: false,
+					},
+				},
+				coldNonTrivial: map[uintptr]singleSyscallRuleSet{
+					unix.SYS_LINKAT: {
+						sysno: unix.SYS_LINKAT,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(471)},
+								action: linux.SECCOMP_RET_KILL_THREAD,
+							},
+							{
+								rule:   PerArg{EqualTo(471471)},
+								action: linux.SECCOMP_RET_KILL_PROCESS,
+							},
+						},
+						vsyscall: false,
+					},
+					unix.SYS_UNLINKAT: {
+						sysno: unix.SYS_UNLINKAT,
+						rules: []syscallRuleAction{
+							{
+								rule:   MatchAll{},
+								action: linux.SECCOMP_RET_KILL_THREAD,
+							},
+							{
+								rule: Or{
+									PerArg{EqualTo(472)},
+									PerArg{EqualTo(472472)},
+								},
+								action: linux.SECCOMP_RET_KILL_PROCESS,
+							},
+							{
+								rule:   PerArg{EqualTo(472472472)},
+								action: linux.SECCOMP_RET_TRAP,
+							},
+						},
+						vsyscall: false,
+					},
+					unix.SYS_MINCORE: {
+						sysno: unix.SYS_MINCORE,
+						rules: []syscallRuleAction{
+							{
+								rule:   PerArg{EqualTo(78)},
+								action: linux.SECCOMP_RET_ERRNO,
+							},
+						},
+						vsyscall: true,
+					},
+					unix.SYS_FUTEX: {
+						sysno: unix.SYS_FUTEX,
+						rules: []syscallRuleAction{
+							{
+								rule:   MatchAll{},
+								action: linux.SECCOMP_RET_ERRNO,
+							},
+						},
+						vsyscall: true,
+					},
+					unix.SYS_GETTIMEOFDAY: {
+						sysno: unix.SYS_GETTIMEOFDAY,
+						rules: []syscallRuleAction{
+							{
+								rule:   MatchAll{},
+								action: linux.SECCOMP_RET_ERRNO,
+							},
+						},
+						vsyscall: true,
+					},
+				},
+				trivial: map[uintptr]singleSyscallRuleSet{
+					unix.SYS_READ: {
+						sysno: unix.SYS_READ,
+						rules: []syscallRuleAction{
+							{
+								rule:   MatchAll{},
+								action: linux.SECCOMP_RET_TRACE,
+							},
+						},
+						vsyscall: false,
+					},
+					unix.SYS_CHDIR: {
+						sysno: unix.SYS_CHDIR,
+						rules: []syscallRuleAction{
+							{
+								rule:   MatchAll{},
+								action: linux.SECCOMP_RET_KILL_THREAD,
+							},
+						},
+						vsyscall: false,
+					},
+					unix.SYS_CLOSE: {
+						sysno: unix.SYS_CLOSE,
+						rules: []syscallRuleAction{
+							{
+								rule:   MatchAll{},
+								action: linux.SECCOMP_RET_KILL_THREAD,
+							},
+						},
+						vsyscall: false,
+					},
+					unix.SYS_FCHDIR: {
+						sysno: unix.SYS_FCHDIR,
+						rules: []syscallRuleAction{
+							{
+								rule:   MatchAll{},
+								action: linux.SECCOMP_RET_KILL_PROCESS,
+							},
+						},
+						vsyscall: false,
+					},
+				},
+				hotNonTrivialOrder: []uintptr{
+					// SYS_READ becomes trivial so it does not show up here.
+					unix.SYS_WRITE,
+					unix.SYS_FLOCK,
+					// SYS_CLOSE also becomes trivial.
+					unix.SYS_OPENAT,
+					unix.SYS_GETPID,
+					// SYS_GETTID does not show up in any RuleSet so it
+					// also does not show up here.
+				},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, gotErr := orderRuleSets(test.ruleSets, test.options)
+			if (gotErr != nil) != test.wantErr {
+				t.Errorf("got error: %v, want error: %v", gotErr, test.wantErr)
+			}
+			if gotErr != nil || t.Failed() {
+				return
+			}
+			// Replace empty maps with nil for simpler comparison output.
+			for _, ors := range []*orderedRuleSets{&got, &test.want} {
+				if len(ors.hotNonTrivial) == 0 {
+					ors.hotNonTrivial = nil
+				}
+				if len(ors.hotNonTrivialOrder) == 0 {
+					ors.hotNonTrivialOrder = nil
+				}
+				if len(ors.coldNonTrivial) == 0 {
+					ors.coldNonTrivial = nil
+				}
+				if len(ors.trivial) == 0 {
+					ors.trivial = nil
+				}
+			}
+			// Run optimizers on all rules of `test.want`.
+			for _, m := range []map[uintptr]singleSyscallRuleSet{
+				test.want.hotNonTrivial,
+				test.want.coldNonTrivial,
+				test.want.trivial,
+			} {
+				for sysno, ssrs := range m {
+					for i, r := range ssrs.rules {
+						ssrs.rules[i].rule = optimizeSyscallRule(r.rule)
+					}
+					m[sysno] = ssrs
+				}
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Errorf("got orderedRuleSets:\n%v\nwant orderedRuleSets:\n%v\n", got, test.want)
+				t.Error("got:")
+				got.log(t.Errorf)
+				t.Errorf("want:")
+				test.want.log(t.Errorf)
+				return
+			}
+			// Log the orderedRuleSet, if only to make sure the log function
+			// actually works and doesn't panic:
+			t.Log("orderedRuleSets matched expectations:")
+			got.log(t.Logf)
+
+			// Attempt to render the `orderedRuleSets`.
+			// We don't check the instructions it generates, but the rendering
+			// code checks itself and panics if it fails an assertion.
+			program := &syscallProgram{bpf.NewProgramBuilder()}
+			if err := got.render(program); err != nil {
+				t.Fatalf("got unexpected error while rendering: %v", err)
 			}
 		})
 	}
