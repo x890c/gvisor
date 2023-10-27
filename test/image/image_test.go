@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/docker/api/types/mount"
 	"gvisor.dev/gvisor/pkg/test/dockerutil"
 	"gvisor.dev/gvisor/pkg/test/testutil"
 )
@@ -317,6 +318,56 @@ func TestStdio(t *testing.T) {
 			t.Fatalf("docker didn't get output %q : %v", want, err)
 		}
 	}
+}
+
+func TestDocker(t *testing.T) {
+	if testutil.IsRunningWithHostNet() {
+		t.Skip("docker doesn't work with hostinet")
+	}
+	ctx := context.Background()
+	d := dockerutil.MakeContainer(ctx, t)
+	defer d.CleanUp(ctx)
+
+	// Start the container.
+	opts := dockerutil.RunOpts{
+		Image:      "basic/docker",
+		Privileged: true,
+		Mounts: []mount.Mount{
+			{
+				Target: "/var/lib/docker",
+				Type:   mount.TypeTmpfs,
+			},
+		},
+	}
+	if err := d.Spawn(ctx, opts); err != nil {
+		t.Fatalf("docker run failed: %v", err)
+	}
+
+	// Docker creates tmpfs mounts with the noexec flag.
+	output, err := d.Exec(ctx,
+		dockerutil.ExecOpts{Privileged: true},
+		"mount", "-o", "remount,exec", "/var/lib/docker",
+	)
+	if err != nil {
+		t.Fatalf("docker exec failed: %v\n%s", err, output)
+	}
+	// Wait for the docker daemon.
+	for i := 0; i < 10; i++ {
+		output, err := d.Exec(ctx, dockerutil.ExecOpts{}, "docker", "info")
+		t.Logf("== docker info ==\n%s", output)
+		if err != nil {
+			t.Logf("docker exec failed: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		break
+	}
+	output, err = d.Exec(ctx, dockerutil.ExecOpts{},
+		"docker", "run", "--network", "host", "--rm", "alpine", "echo", "Hello World")
+	if err != nil {
+		t.Fatalf("docker exec failed: %v\n%s", err, output)
+	}
+	t.Logf("Container output: %s", output)
 }
 
 func TestMain(m *testing.M) {
