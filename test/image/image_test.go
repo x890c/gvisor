@@ -368,6 +368,10 @@ func TestDocker(t *testing.T) {
 		t.Fatalf("docker exec failed: %v\n%s", err, output)
 	}
 	t.Logf("Container output: %s", output)
+
+	if output != "Hello World\n" {
+		t.Errorf("Unexpected output: %s", output)
+	}
 }
 
 func TestMain(m *testing.M) {
