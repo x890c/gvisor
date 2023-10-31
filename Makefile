@@ -263,9 +263,15 @@ simple-tests: unit-tests # Compatibility target.
 .PHONY: simple-tests
 
 gpu-tests: load-basic_cuda-vector-add load-gpu_cuda-tests $(RUNTIME_BIN)
-	@$(call test,--test_env=RUNTIME=runc //test/gpu:gpu_test)
+	@$(call sudo,--test_env=RUNTIME=runc //test/gpu:gpu_test, -test.v)
 	@$(call install_runtime,$(RUNTIME),--platform=systrap --nvproxy=true --nvproxy-docker=true)
-	@$(call test_runtime,$(RUNTIME),//test/gpu:gpu_test)
+	@$(call sudo,test/gpu:gpu_test,--runtime=$(RUNTIME) -test.v $(ARGS))
+.PHONE: gpu-tests
+
+cos-gpu-tests: load-basic_cuda-vector-add load-gpu_cuda-tests $(RUNTIME_BIN)
+	@$(call sudo,test/gpu:gpu_test,--runtime=runc -test.v --cos-gpu $(ARGS))
+	@$(call install_runtime,$(RUNTIME),--platform=systrap --nvproxy=true)
+	@$(call sudo,test/gpu:gpu_test,--runtime=$(RUNTIME) -test.v --cos-gpu $(ARGS))
 .PHONE: gpu-tests
 
 portforward-tests: load-basic_redis load-basic_nginx $(RUNTIME_BIN)
